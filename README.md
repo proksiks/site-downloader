@@ -8,22 +8,29 @@
   <p><a href="https://github.com/proksiks/site-downloader/releases/latest"><strong>↓ Скачать для компьютера</strong></a></p>
 </div>
 
-![Интерфейс Site Downloader с настройками захвата и готовым архивом](docs/interface.png)
+## Скачать и установить
 
-## Скачать
+**Если у тебя Mac с чипом M1, M2, M3, M4 или новее, скачай [версию для Mac с Apple Silicon (.dmg)][mac-apple].**
 
-Установщики публикуются в разделе [GitHub Releases](https://github.com/proksiks/site-downloader/releases). В открытом релизе выбери файл для своей системы.
+Прямые ссылки для версии [v0.1.0](https://github.com/proksiks/site-downloader/releases/tag/v0.1.0):
 
-| Система | Архитектура | Файл |
+| Компьютер | Установщик | Что делать после скачивания |
 | --- | --- | --- |
-| Windows 11 | x64 | `*-setup.exe` |
-| macOS 14 и новее | Apple Silicon | `*_aarch64.dmg` |
-| macOS 14 и новее | Intel | `*_x64.dmg` |
-| Linux | x64 | `*.AppImage` или `*_amd64.deb` |
+| **Mac с чипом Apple серии M**, macOS 14 и новее | [Скачать .dmg для Apple Silicon][mac-apple] | Открой образ и перетащи Site Downloader в «Программы». |
+| **Mac с процессором Intel**, macOS 14 и новее | [Скачать .dmg для Intel][mac-intel] | Открой образ и перетащи Site Downloader в «Программы». |
+| **Windows 11, 64-битная (x64)** | [Скачать установщик .exe][windows] | Запусти файл и следуй шагам установки. |
+| **Ubuntu или Debian, 64-битные (x64)** | [Скачать пакет .deb][linux-deb] | Открой пакет в установщике приложений или выполни `sudo apt install ./имя-файла.deb`. |
+| **Другие дистрибутивы Linux, 64-битные (x64)** | [Скачать .AppImage][linux-appimage] | Разреши запуск файла в его свойствах и открой его. Для Chromium могут потребоваться системные библиотеки. |
 
-Установщик включает Node.js. При первом захвате приложение само скачивает нужную версию Chromium, если её ещё нет. На macOS и Windows загрузки могут показывать системное предупреждение, пока у сборок нет подписи издателя. На Debian и Ubuntu пакет `.deb` можно установить через `sudo apt install ./имя-файла.deb`. Для AppImage нужен исполняемый файл и системные библиотеки Chromium.
+**Как узнать, какой у тебя Mac.** Открой  → «Об этом Mac». Если в строке «Чип» указано Apple M с номером, выбирай Apple Silicon. Если в строке «Процессор» указано Intel, выбирай Intel. [Справка Apple](https://support.apple.com/ru-ru/116943)
 
-iPhone и iPad пока не поддерживаются. Захват в этой версии выполняет отдельный процесс Chromium для настольной ОС.
+**Первый запуск.** Установщик уже включает Node.js. При первом захвате приложение само скачает Chromium, если его ещё нет. На macOS и Windows может появиться предупреждение о неподписанной сборке. Версии для iPhone и iPad пока нет.
+
+[mac-apple]: https://github.com/proksiks/site-downloader/releases/download/v0.1.0/Site.Downloader_0.1.0_aarch64.dmg
+[mac-intel]: https://github.com/proksiks/site-downloader/releases/download/v0.1.0/Site.Downloader_0.1.0_x64.dmg
+[windows]: https://github.com/proksiks/site-downloader/releases/download/v0.1.0/Site.Downloader_0.1.0_x64-setup.exe
+[linux-deb]: https://github.com/proksiks/site-downloader/releases/download/v0.1.0/Site.Downloader_0.1.0_amd64.deb
+[linux-appimage]: https://github.com/proksiks/site-downloader/releases/download/v0.1.0/Site.Downloader_0.1.0_amd64.AppImage
 
 ## Что умеет
 
@@ -41,6 +48,8 @@ iPhone и iPad пока не поддерживаются. Захват в эт�
 4. Нажми **Смотреть офлайн** или **Открыть папку**.
 
 Обход идёт по ссылкам в пределах одного протокола, домена и порта. Закрытые страницы могут содержать данные аккаунта в сохранённом HTML и ресурсах.
+
+![Интерфейс Site Downloader с настройками захвата и готовым архивом](docs/interface.png)
 
 ## Как устроен архив
 

@@ -103,4 +103,26 @@ jobs:
             echo "Expected five desktop installers, got ${#files[@]}."
             exit 1
           fi
-          gh release create "$RELEASE_TAG" "${files[@]}" --verify-tag --title "Site Downloader $RELEASE_TAG" --generate-notes
+          labeled_files=()
+          for file in "${files[@]}"; do
+            case "$file" in
+              *_aarch64.dmg) label='macOS — Apple Silicon (чипы M) · .dmg' ;;
+              *_x64.dmg) label='macOS — Intel · .dmg' ;;
+              *.exe) label='Windows — 64-битная (x64) · .exe' ;;
+              *.deb) label='Ubuntu / Debian — 64-битные (x64) · .deb' ;;
+              *.AppImage) label='Linux — 64-битный (x64) · .AppImage' ;;
+              *) echo "Unrecognized installer: $file"; exit 1 ;;
+            esac
+            labeled_files+=("$file#$label")
+          done
+          cat > release-notes.md <<'EOF'
+          ## Какой файл скачать
+
+          - **Mac с чипом M1, M2, M3, M4 или новее** — `Apple Silicon` (.dmg).
+          - **Mac с процессором Intel** — `Intel` (.dmg).
+          - **Windows x64** — установщик (.exe).
+          - **Linux x64** — пакет для Ubuntu и Debian (.deb) или AppImage.
+
+          Тип Mac указан в меню  → «Об этом Mac». При первом захвате приложение скачает Chromium, если его ещё нет.
+          EOF
+          gh release create "$RELEASE_TAG" "${labeled_files[@]}" --verify-tag --title "Site Downloader $RELEASE_TAG" --notes-file release-notes.md --generate-notes
