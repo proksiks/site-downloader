@@ -7,6 +7,8 @@
     "generate": "nuxt generate",
     "build:worker": "esbuild worker/capture.cjs --bundle --platform=node --target=node22 --external:playwright-core --outfile=dist-worker/capture.cjs",
     "browser:install": "playwright install chromium --no-shell",
+    "release:prepare": "node scripts/prepare-release.cjs",
+    "release:build": "npm run release:prepare && tauri build --config src-tauri/tauri.release.json",
     "tauri": "tauri"
   },
   "dependencies": {

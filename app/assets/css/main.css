@@ -188,6 +188,7 @@ input[type="checkbox"]:focus-visible,
 .status[data-phase="complete"] { background: var(--ui-success-bg); color: var(--ui-success); }
 .status[data-phase="error"], .error { background: var(--ui-error-bg); color: var(--ui-error); }
 .status[data-phase="opening"], .status[data-phase="awaitingLogin"],
+.status[data-phase="installingBrowser"],
 .status[data-phase="capturing"], .status[data-phase="saving"], .status[data-phase="offline"] {
   background: var(--ui-accent-bg);
   color: var(--ui-accent-ink);

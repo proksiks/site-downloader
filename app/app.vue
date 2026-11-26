@@ -3,7 +3,7 @@ import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 
 type Counts = { pages: number; failedPages: number; files: number; bytes: number; skipped: number }
-type CapturePhase = 'opening' | 'awaitingLogin' | 'capturing' | 'saving' | 'offline'
+type CapturePhase = 'opening' | 'installingBrowser' | 'awaitingLogin' | 'capturing' | 'saving' | 'offline'
 type CaptureEvent =
   | ({ type: 'progress'; phase: CapturePhase; currentUrl: string; currentPage: number } & Counts)
   | ({ type: 'complete'; folder: string; offlineEntryFile: string | null; pageLimitReached: boolean } & Counts)
@@ -39,6 +39,7 @@ const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
 const status = computed(() => ({
   idle: 'Готов к захвату',
   opening: 'Открываем страницу',
+  installingBrowser: 'Скачиваем Chromium',
   awaitingLogin: 'Ожидаем входа',
   capturing: 'Собираем ресурсы',
   saving: 'Завершаем сохранение',

@@ -62,6 +62,9 @@ fn node_candidates(app: &AppHandle) -> Vec<OsString> {
     if let Some(path) = env::var_os("SITE_DOWNLOADER_NODE") {
         candidates.push(path);
     }
+    if let Some(node) = bundled_node(app) {
+        candidates.push(node.into_os_string());
+    }
     candidates.push("node".into());
 
     #[cfg(unix)]
@@ -99,6 +102,14 @@ fn node_candidates(app: &AppHandle) -> Vec<OsString> {
     candidates
 }
 
+fn bundled_node(app: &AppHandle) -> Option<PathBuf> {
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    app.path()
+        .resolve(Path::new("runtime").join(name), BaseDirectory::Resource)
+        .ok()
+        .filter(|path| path.is_file())
+}
+
 fn spawn_worker(app: &AppHandle, script: &Path, request: &CaptureRequest) -> Result<Child, String> {
     let options = serde_json::to_string(&request.options).map_err(|error| error.to_string())?;
     for node in node_candidates(app) {
@@ -113,6 +124,9 @@ fn spawn_worker(app: &AppHandle, script: &Path, request: &CaptureRequest) -> Res
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        if bundled_node(app).is_some() {
+            command.env("SITE_DOWNLOADER_AUTO_INSTALL_BROWSER", "1");
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

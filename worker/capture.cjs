@@ -1,9 +1,12 @@
 const { chromium } = require('playwright-core')
+const { execFile } = require('node:child_process')
 const { EventEmitter, once } = require('node:events')
-const { mkdir, mkdtemp, rename, rm, writeFile } = require('node:fs/promises')
+const { constants } = require('node:fs')
+const { access, mkdir, mkdtemp, rename, rm, writeFile } = require('node:fs/promises')
 const { dirname, extname, join } = require('node:path')
 const { createInterface } = require('node:readline')
 const { setTimeout: delay } = require('node:timers/promises')
+const { promisify } = require('node:util')
 const { createOffline } = require('./offline.cjs')
 const { ArchivePaths, contentExtension } = require('./archive-paths.cjs')
 
@@ -82,6 +85,25 @@ async function waitForLogin(page, url, onReady) {
 }
 
 class PageCaptureError extends Error {}
+
+async function ensureChromium(onInstall) {
+  if (process.env.SITE_DOWNLOADER_AUTO_INSTALL_BROWSER !== '1') return
+  const available = async () => access(chromium.executablePath(), constants.X_OK).then(() => true, () => false)
+  if (await available()) return
+
+  onInstall()
+  const cli = join(dirname(require.resolve('playwright-core/package.json')), 'cli.js')
+  try {
+    await promisify(execFile)(process.execPath, [cli, 'install', 'chromium', '--no-shell', '--no-remove', '--no-progress'], {
+      signal,
+      windowsHide: true,
+    })
+  } catch (error) {
+    signal.throwIfAborted()
+    throw new Error('Не удалось скачать Chromium. Проверь подключение к интернету и попробуй ещё раз.')
+  }
+  if (!await available()) throw new Error('Установленный Chromium не найден.')
+}
 
 async function capture(target, directory, waitSeconds, pageLimit, options) {
   const url = webUrl(target)
@@ -283,6 +305,13 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
 
   signal.addEventListener('abort', closeBrowser, { once: true })
   try {
+    progress()
+    await ensureChromium(() => {
+      phase = 'installingBrowser'
+      progress()
+    })
+    signal.throwIfAborted()
+    phase = 'opening'
     progress()
     browser = await chromium.launch({
       channel: 'chromium',

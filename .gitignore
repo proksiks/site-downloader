@@ -2,6 +2,7 @@
 /.output/
 /dist/
 /dist-worker/
+/dist-runtime/
 /node_modules/
 /site/
 /src-tauri/target/
