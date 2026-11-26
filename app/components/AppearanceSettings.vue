@@ -122,7 +122,7 @@ watch(settings, () => {
 <template>
   <button
     type="button"
-    class="secondary ml-auto inline-flex items-center gap-2"
+    class="secondary inline-flex items-center gap-2"
     aria-haspopup="dialog"
     @click="dialog?.showModal()"
   >

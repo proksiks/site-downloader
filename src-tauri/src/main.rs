@@ -430,7 +430,8 @@ fn main() {
             open_archive,
             archive_browser::list_archive_files,
             archive_browser::preview_archive_file,
-            archive_browser::reveal_archive_file
+            archive_browser::reveal_archive_file,
+            archive_browser::analyze_archive_javascript
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Site Downloader");

@@ -568,3 +568,50 @@ input[type="checkbox"]:focus-visible,
   margin-inline: auto;
   object-fit: contain;
 }
+
+.help-dialog {
+  inset: 0;
+  width: min(39rem, calc(100% - 1.5rem));
+  max-width: none;
+  max-height: calc(100% - 1.5rem);
+  margin: auto;
+  overflow: auto;
+  color: var(--ui-text);
+}
+
+.help-dialog::backdrop { background: #0d1c16a6; }
+
+.help-topic {
+  border: 1px solid var(--ui-border);
+  border-radius: .65rem;
+  background: var(--ui-field);
+}
+
+.help-topic summary {
+  padding: .65rem .75rem;
+  border-radius: inherit;
+  font-size: .86rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.help-topic summary:focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+.help-topic[open] summary { color: var(--ui-accent-ink); }
+
+.help-copy {
+  padding: 0 .75rem .75rem;
+  color: var(--ui-muted);
+  font-size: .84rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.help-copy > * + *,
+.help-copy li + li { margin-top: .35rem; }
+.help-copy ol { list-style: decimal; padding-inline-start: 1.3rem; }
+.help-copy ul { list-style: disc; padding-inline-start: 1.3rem; }
+.help-copy strong { color: var(--ui-text); }

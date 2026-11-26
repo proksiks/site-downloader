@@ -23,6 +23,15 @@ type ArchiveFile = {
   variant: 'original' | 'snapshot' | 'export'
   preview: string | null
 }
+type Shader = {
+  name: string | null
+  stage: 'vertex' | 'fragment'
+  line: number
+  code: string
+  truncated: boolean
+  usages: { line: number; label: string }[]
+}
+type Analysis = { code: string; truncated: boolean; sourceMap: 'inline' | 'linked' | null; shaders: Shader[]; shaderCount: number }
 
 const dialog = ref<HTMLDialogElement | null>(null)
 const detail = ref<HTMLElement | null>(null)
@@ -39,6 +48,15 @@ const previewLoading = ref(false)
 const source = ref('')
 const image = ref('')
 const truncated = ref(false)
+const analysis = shallowRef<Analysis | null>(null)
+const analyzing = ref(false)
+const analysisTab = ref<'code' | 'shaders'>('code')
+const shaderSearch = ref('')
+const shaderIndex = ref(0)
+const codeSearch = ref('')
+const codeMatchIndex = ref(0)
+const codeJumpLine = ref(0)
+const codeRadius = ref(20)
 let requestId = 0
 let previewId = 0
 
@@ -57,6 +75,38 @@ const matches = computed(() => {
 })
 const visible = computed(() => matches.value.slice(0, shown.value))
 const variantLabels = { original: '', snapshot: 'Снимок', export: 'Экспорт' }
+const matchingShaders = computed(() => {
+  const query = shaderSearch.value.trim().toLowerCase()
+  return (analysis.value?.shaders ?? []).filter(shader =>
+    !query || shader.name?.toLowerCase().includes(query) || shader.code.toLowerCase().includes(query),
+  )
+})
+const activeShader = computed(() => matchingShaders.value[shaderIndex.value])
+watch(shaderSearch, () => { shaderIndex.value = 0 })
+watch(codeSearch, () => { codeMatchIndex.value = 0 })
+watch([codeSearch, codeMatchIndex, codeJumpLine], () => { codeRadius.value = 20 })
+
+const codeLines = computed(() => analysis.value?.code.split('\n') ?? [])
+const codeMatches = computed(() => {
+  const query = codeSearch.value.trim().toLowerCase()
+  return query ? codeLines.value.flatMap((line, index) => line.toLowerCase().includes(query) ? [index + 1] : []) : []
+})
+const currentCodeLine = computed(() => codeSearch.value.trim() ? codeMatches.value[codeMatchIndex.value] : codeJumpLine.value)
+const codeContext = computed(() => {
+  const line = currentCodeLine.value
+  if (!line) return ''
+  const start = Math.max(0, line - codeRadius.value - 1)
+  return codeLines.value.slice(start, line + codeRadius.value).map((code, offset) => {
+    const number = start + offset + 1
+    return `${number === line ? '›' : ' '} ${String(number).padStart(5)}  ${code}`
+  }).join('\n')
+})
+
+function jumpToCode(line: number) {
+  codeSearch.value = ''
+  codeJumpLine.value = line
+  analysisTab.value = 'code'
+}
 
 function clearPreview() {
   previewId++
@@ -67,6 +117,14 @@ function clearPreview() {
   previewError.value = ''
   previewLoading.value = false
   truncated.value = false
+  analysis.value = null
+  analyzing.value = false
+  analysisTab.value = 'code'
+  shaderSearch.value = ''
+  shaderIndex.value = 0
+  codeSearch.value = ''
+  codeMatchIndex.value = 0
+  codeJumpLine.value = 0
 }
 
 async function show(directory: string) {
@@ -142,6 +200,20 @@ async function reveal(entry: ArchiveFile) {
   }
 }
 
+async function analyze(entry: ArchiveFile) {
+  const current = previewId
+  analyzing.value = true
+  previewError.value = ''
+  try {
+    const result = await invoke<Analysis>('analyze_archive_javascript', { directory: folder.value, path: entry.path })
+    if (current === previewId) analysis.value = result
+  } catch (cause) {
+    if (current === previewId) previewError.value = String(cause)
+  } finally {
+    if (current === previewId) analyzing.value = false
+  }
+}
+
 function name(path: string) {
   return path.split(/[/\\]/).at(-1) || path
 }
@@ -204,16 +276,84 @@ function name(path: string) {
           <h3 class="break-all text-sm font-semibold">{{ name(selected.path) }}</h3>
           <p class="mt-1 break-all font-mono text-xs muted">{{ selected.path }}</p>
           <p v-if="selected.url" class="mt-1 break-all text-xs muted">{{ captureAddress(selected.url) }}</p>
-          <button type="button" class="secondary mt-3" @click="reveal(selected)">Показать файл</button>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button type="button" class="secondary" @click="reveal(selected)">Показать файл</button>
+            <button v-if="selected.category === 'js' && !analysis" type="button" class="secondary" :disabled="analyzing" @click="analyze(selected)">
+              {{ analyzing ? 'Разбираем JavaScript…' : 'Разобрать JavaScript' }}
+            </button>
+          </div>
           <p v-if="previewLoading" class="mt-3 text-xs muted" role="status">Читаем файл…</p>
-          <p v-else-if="previewError" class="error mt-3" role="alert">{{ previewError }}</p>
+          <p v-if="previewError" class="error mt-3" role="alert">{{ previewError }}</p>
+          <template v-if="analysis">
+            <div class="mt-3 flex flex-wrap gap-2" aria-label="Результаты разбора">
+              <button type="button" class="archive-category" :aria-pressed="analysisTab === 'code'" @click="analysisTab = 'code'">Читаемый код</button>
+              <button type="button" class="archive-category" :aria-pressed="analysisTab === 'shaders'" @click="analysisTab = 'shaders'">
+                Шейдеры GLSL <span class="archive-category-count">{{ analysis.shaderCount }}</span>
+              </button>
+            </div>
+            <template v-if="analysisTab === 'code'">
+              <p v-if="analysis.sourceMap" class="mt-2 text-xs muted">{{ analysis.sourceMap === 'inline' ? 'В бандле есть встроенная карта исходников.' : 'В бандле есть ссылка на карту исходников.' }}</p>
+              <p v-if="analysis.truncated" class="mt-2 text-xs muted">Показано начало отформатированного файла.</p>
+              <div class="input-shell mt-2 flex items-center">
+                <label for="archive-code-search" class="sr-only">Поиск по JavaScript</label>
+                <input id="archive-code-search" v-model="codeSearch" type="search" placeholder="Поиск по JavaScript, например buildWater">
+              </div>
+              <div v-if="codeSearch.trim() && codeMatches.length" class="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                <span class="muted">Совпадение {{ codeMatchIndex + 1 }} из {{ codeMatches.length }}</span>
+                <button type="button" class="text-action" :disabled="codeMatchIndex === 0" @click="codeMatchIndex--">Предыдущее</button>
+                <button type="button" class="text-action" :disabled="codeMatchIndex + 1 >= codeMatches.length" @click="codeMatchIndex++">Следующее</button>
+              </div>
+              <p v-if="codeSearch.trim() && !codeMatches.length" class="mt-2 text-xs muted">Совпадений в JavaScript нет.</p>
+              <template v-else-if="codeContext">
+                <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span class="muted">Строка {{ currentCodeLine }}</span>
+                  <div class="flex flex-wrap items-center gap-3">
+                    <button type="button" class="text-action" @click="codeRadius += 30">Больше строк</button>
+                    <button type="button" class="text-action" @click="codeJumpLine = 0; codeSearch = ''">Показать весь код</button>
+                  </div>
+                </div>
+                <pre class="archive-code-preview mt-2">{{ codeContext }}</pre>
+              </template>
+              <pre v-else class="archive-code-preview mt-2">{{ analysis.code }}</pre>
+            </template>
+            <template v-else>
+              <p v-if="analysis.shaderCount === 0" class="mt-2 text-xs muted">Встроенные GLSL-шейдеры не найдены.</p>
+              <template v-else>
+                <div class="input-shell mt-2 flex items-center">
+                  <label for="shader-search" class="sr-only">Поиск в шейдерах</label>
+                  <input id="shader-search" v-model="shaderSearch" type="search" placeholder="Поиск в шейдерах, например ripple">
+                </div>
+                <template v-if="activeShader">
+                  <label for="shader-select" class="sr-only">Выбрать шейдер</label>
+                  <select id="shader-select" v-model.number="shaderIndex" class="settings-select mt-2">
+                    <option v-for="(shader, index) in matchingShaders" :key="index" :value="index">
+                      {{ shader.name || 'GLSL' }} · {{ shader.stage === 'vertex' ? 'вершинный' : 'фрагментный' }} · строка {{ shader.line }}
+                    </option>
+                  </select>
+                  <pre class="archive-code-preview mt-2">{{ activeShader.code }}</pre>
+                  <p v-if="activeShader.truncated" class="mt-2 text-xs muted">Показано начало шейдера.</p>
+                  <div v-if="activeShader.usages?.length" class="mt-3">
+                    <h4 class="text-xs font-semibold">Связанный JavaScript</h4>
+                    <div class="mt-2 flex flex-wrap gap-2">
+                      <button v-for="usage in activeShader.usages" :key="usage.line" type="button"
+                              class="archive-category" @click="jumpToCode(usage.line)">
+                        {{ usage.label }} · строка {{ usage.line }}
+                      </button>
+                    </div>
+                  </div>
+                </template>
+                <p v-else class="mt-2 text-xs muted">Шейдеры по этому запросу не найдены.</p>
+                <p v-if="analysis.shaderCount > analysis.shaders.length" class="mt-2 text-xs muted">Показаны первые {{ analysis.shaders.length }} шейдеров.</p>
+              </template>
+            </template>
+          </template>
           <img v-else-if="image" :src="image" :alt="name(selected.path)" class="archive-image-preview mt-3">
-          <template v-else-if="selected.preview === 'text/plain'">
+          <template v-else-if="selected.preview === 'text/plain' && !previewLoading">
             <p v-if="truncated" class="mt-3 text-xs muted">Показаны первые 256 КБ.</p>
             <pre v-if="source" class="archive-code-preview mt-3">{{ source }}</pre>
             <p v-else class="mt-3 text-xs muted">Файл пуст.</p>
           </template>
-          <p v-else class="mt-3 text-xs muted">Открой файл из папки архива в подходящей программе.</p>
+          <p v-else-if="!selected.preview" class="mt-3 text-xs muted">Открой файл из папки архива в подходящей программе.</p>
         </template>
       </section>
     </div>

@@ -495,6 +495,9 @@ async function run() {
     await replay(directory, { launch: launchBrowser, signal, send, useOriginalAddress: waitSeconds === 'original' })
     signal.throwIfAborted()
     send({ type: 'complete' })
+  } else if (target === '--analyze-js') {
+    const { analyzeJavaScript } = require('./analyze-js.cjs')
+    send({ type: 'analysis', result: await analyzeJavaScript(directory) })
   } else {
     await capture(target, directory, Number(waitSeconds), Number(pageLimit), JSON.parse(options))
   }

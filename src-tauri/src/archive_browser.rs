@@ -1,4 +1,4 @@
-use crate::{archive_file, read_archive_manifest};
+use crate::{archive_file, read_archive_manifest, spawn_worker};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -221,6 +221,38 @@ pub fn reveal_archive_file(app: AppHandle, directory: PathBuf, path: String) -> 
     app.opener()
         .reveal_item_in_dir(path)
         .map_err(|error| format!("Не удалось показать файл. {error}"))
+}
+
+#[tauri::command]
+pub async fn analyze_archive_javascript(
+    app: AppHandle,
+    directory: PathBuf,
+    path: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (file, entry) = resolve_entry(&directory, &path)?;
+        if entry.category != "js" {
+            return Err("Выбери файл JavaScript.".into());
+        }
+        let mut worker = spawn_worker(&app, &["--analyze-js".into(), file.into_os_string()])?;
+        // Keep control stdin open until the worker has finished.
+        let stdin = worker.stdin.take();
+        let output = worker
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
+        drop(stdin);
+        let event: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "Не удалось разобрать JavaScript.")?;
+        if output.status.success() && event["type"] == "analysis" {
+            return Ok(event["result"].clone());
+        }
+        Err(event["message"]
+            .as_str()
+            .unwrap_or("Не удалось разобрать JavaScript.")
+            .into())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

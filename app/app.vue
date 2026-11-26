@@ -278,8 +278,11 @@ async function stopReplay() {
           <path d="M12 3v12m-4-4 4 4 4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
         </svg>
       </div>
-      <span class="font-semibold tracking-tight">Site Downloader</span>
-      <AppearanceSettings />
+      <span class="min-w-0 truncate font-semibold tracking-tight">Site Downloader</span>
+      <div class="ml-auto flex shrink-0 items-center gap-2">
+        <AppHelp />
+        <AppearanceSettings />
+      </div>
     </div>
   </header>
 
