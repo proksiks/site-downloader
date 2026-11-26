@@ -9,6 +9,9 @@ const { setTimeout: delay } = require('node:timers/promises')
 const { promisify } = require('node:util')
 const { createOffline } = require('./offline.cjs')
 const { ArchivePaths, contentExtension } = require('./archive-paths.cjs')
+const { replay } = require('./replay.cjs')
+const { exportSceneAssets } = require('./scene-assets.cjs')
+const { captureActivity } = require('./capture-activity.cjs')
 
 function send(event) {
   process.stdout.write(JSON.stringify(event) + '\n')
@@ -64,17 +67,14 @@ function isVideo(response, address) {
     /\.(?:mp4|webm|m4v|mov|ogv|mkv|mpg|mpeg|avi|m3u8|mpd|m4s)$/i.test(new URL(address).pathname)
 }
 
-async function waitForLogin(page, url, onReady) {
-  await page.goto(url, { waitUntil: 'commit', timeout: 60_000 }).catch(() => {
-    throw new Error('Не удалось открыть страницу для входа.')
-  })
+async function waitForConfirmation(page, onReady, closedMessage) {
   const waiting = new AbortController()
   const options = { signal: AbortSignal.any([signal, waiting.signal]) }
   try {
     const confirmed = Promise.race([
       once(commands, 'continue', options),
       once(page, 'close', options).then(() => {
-        throw new Error('Окно входа закрыто. Запусти захват заново.')
+        throw new Error(closedMessage)
       }),
     ])
     onReady()
@@ -105,6 +105,22 @@ async function ensureChromium(onInstall) {
   if (!await available()) throw new Error('Установленный Chromium не найден.')
 }
 
+async function launchBrowser(options) {
+  return chromium.launch({
+    channel: 'chromium',
+    chromiumSandbox: true,
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
+    ...options,
+  }).catch((error) => {
+    if (error.message.includes('Executable doesn\'t exist')) {
+      throw new Error('Chromium не установлен. Выполни npm run browser:install.')
+    }
+    throw error
+  })
+}
+
 async function capture(target, directory, waitSeconds, pageLimit, options) {
   const url = webUrl(target)
   if (!url) throw new Error('Укажи HTTP или HTTPS URL без логина и пароля.')
@@ -114,7 +130,7 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
   if (!Number.isInteger(pageLimit) || pageLimit < 1 || pageLimit > 100) {
     throw new Error('Укажи лимит от 1 до 100 страниц.')
   }
-  const { login = false, skipVideo = false } = options
+  const { login = false, skipVideo = false, manualScene = false } = options
   const include = pathPrefixes(options.includePaths)
   const exclude = pathPrefixes(options.excludePaths)
 
@@ -136,6 +152,9 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
   const redirects = []
   const queue = new Set([resourceUrl(url.href).href])
   const visited = new Set()
+  const activity = captureActivity()
+  const inFlight = new Map()
+  const pending = new Map()
   let browser
   let origin
   let currentUrl = url.href
@@ -143,6 +162,8 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
   let phase = 'opening'
   let bytes = 0
   let skipped = 0
+  let failedResources = 0
+  let processedPages = 0
 
   function counts() {
     return {
@@ -151,11 +172,22 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
       skipped,
       pages: pages.size,
       failedPages: failedPages.length,
+      failedResources,
     }
   }
 
   function progress() {
-    send({ type: 'progress', phase, currentUrl, currentPage, pageLimit, ...counts() })
+    const active = [...new Set([...inFlight.values(), ...pending.keys()])]
+    send({
+      type: 'progress', phase, currentUrl, currentPage, pageLimit, ...counts(),
+      activity: {
+        ...activity.snapshot(),
+        processedPages,
+        queuedPages: Math.min(queue.size, pageLimit - currentPage),
+        activeCount: active.length,
+        activeUrls: active.slice(-3).reverse(),
+      },
+    })
   }
 
   async function save(response, address, file, body) {
@@ -163,18 +195,56 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
     await mkdir(dirname(destination), { recursive: true })
     await writeFile(destination, body)
     bytes += body.length
+    activity.saved(body.length)
     return {
       url: address,
       file,
       contentType: response.headers()['content-type'] || '',
+      method: response.request().method(),
       bytes: body.length,
       status: response.status(),
     }
   }
 
+  async function discoverLinks(page) {
+    if (webUrl(page.url())?.origin !== origin) return null
+    const rendered = await page.evaluate(() => ({
+      base: document.baseURI,
+      links: Array.from(document.querySelectorAll('a[href]:not([download]), area[href]'), link => link.getAttribute('href')),
+    })).catch(() => null)
+    if (!rendered) return null
+    for (const href of rendered.links) {
+      if (!href || href.startsWith('#')) continue
+      const link = resourceUrl(href, rendered.base)
+      if (link?.origin === origin && allowedPath(link.pathname) &&
+          !pages.has(link.href) && !visited.has(link.href)) {
+        queue.add(link.href)
+      }
+    }
+    return rendered.base
+  }
+
   async function capturePage(page, address) {
-    const pending = new Map()
     let writeError
+
+    function track(request) {
+      if (request.resourceType() === 'document') return
+      const url = resourceUrl(request.url())
+      if (url && !assets.has(url.href)) inFlight.set(request, url.href)
+    }
+
+    function untrack(request) {
+      inFlight.delete(request)
+    }
+
+    function failed(request) {
+      const assetUrl = inFlight.get(request)
+      const message = request.failure()?.errorText
+      untrack(request)
+      if (!assetUrl || signal.aborted || message === 'net::ERR_ABORTED') return
+      failedResources++
+      activity.record('error', 'Запрос не удался', assetUrl, message)
+    }
 
     function onResponse(response) {
       const request = response.request()
@@ -182,7 +252,12 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
 
       const assetUrl = resourceUrl(response.url())?.href
       const status = response.status()
-      if (!assetUrl || !response.ok() || status === 204 || status === 206) return
+      if (!assetUrl) return
+      if (status >= 400 && !assets.has(assetUrl)) {
+        failedResources++
+        activity.record('error', 'Сервер вернул ошибку', assetUrl, `HTTP ${status}`)
+      }
+      if (!response.ok() || status === 204 || status === 206) return
       if (skipVideo && isVideo(response, assetUrl)) return
       for (let redirect = request.redirectedFrom(); redirect; redirect = redirect.redirectedFrom()) {
         const source = resourceUrl(redirect.url())
@@ -191,7 +266,10 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
       if (assets.has(assetUrl) || pending.has(assetUrl)) return
 
       const task = response.body().catch(() => {
-        skipped++
+        if (!signal.aborted) {
+          skipped++
+          activity.record('error', 'Не удалось прочитать файл', assetUrl)
+        }
         return null
       }).then(async (body) => {
         if (body && !signal.aborted) {
@@ -199,6 +277,7 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
           const file = archivePaths.asset(assetUrl, type)
           const asset = await save(response, assetUrl, file, body)
           assets.set(assetUrl, asset)
+          activity.record('resource', 'Сохранён файл', assetUrl, file, asset.bytes)
         }
       }).catch((error) => {
         writeError ??= error
@@ -207,6 +286,9 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
     }
 
     page.on('response', onResponse)
+    page.on('request', track)
+    page.on('requestfinished', untrack)
+    page.on('requestfailed', failed)
     try {
       const response = await page.goto(currentPage === 1 ? url.href : address, {
         waitUntil: 'domcontentloaded',
@@ -247,27 +329,28 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
         (html ? '.html' : (/^\.[a-z0-9]{1,12}$/.test(sourceExtension) ? sourceExtension : '.bin'))
       const file = archivePaths.page(final.href, extension)
 
-      await delay(waitSeconds * 1000, undefined, { signal })
-      if (html && webUrl(page.url())?.origin === origin) {
-        const rendered = await page.evaluate(() => ({
-          base: document.baseURI,
-          links: Array.from(document.querySelectorAll('a[href]:not([download]), area[href]'), link => link.getAttribute('href')),
-        })).catch(() => null)
-        for (const href of rendered?.links ?? []) {
-          if (!href || href.startsWith('#')) continue
-          const link = resourceUrl(href, rendered.base)
-          if (link?.origin === origin && allowedPath(link.pathname) &&
-              !pages.has(link.href) && !visited.has(link.href)) {
-            queue.add(link.href)
-          }
-        }
-        const snapshot = rendered && await page.content().catch(() => null)
+      if (html) {
+        await discoverLinks(page)
+        progress()
+      }
+      if (manualScene && currentPage === 1 && html) {
+        await waitForConfirmation(page, () => {
+          phase = 'awaitingScene'
+          activity.record('system', 'Ожидаем завершения ручного захвата')
+          progress()
+        }, 'Окно Chromium закрыто до завершения захвата сцены.')
+      } else {
+        await delay(waitSeconds * 1000, undefined, { signal })
+      }
+      if (html) {
+        const base = await discoverLinks(page)
+        const snapshot = base && await page.content().catch(() => null)
         if (snapshot && webUrl(page.url())?.origin === origin) {
           const snapshotFile = offlinePaths.page(final.href)
           const destination = join(staging, 'offline', snapshotFile)
           await mkdir(dirname(destination), { recursive: true })
           await writeFile(destination, snapshot, 'utf8')
-          snapshots.set(final.href, { file: snapshotFile, base: rendered.base })
+          snapshots.set(final.href, { file: snapshotFile, base })
         }
       }
 
@@ -282,9 +365,15 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
         drain.abort()
       }
       signal.throwIfAborted()
-      pages.set(final.href, await save(response, final.href, file, body))
+      const savedPage = await save(response, final.href, file, body)
+      pages.set(final.href, savedPage)
+      activity.record('page', 'Сохранена страница', final.href, file, savedPage.bytes)
     } finally {
       page.off('response', onResponse)
+      page.off('request', track)
+      page.off('requestfinished', untrack)
+      page.off('requestfailed', failed)
+      inFlight.clear()
       if (login && !signal.aborted && !page.isClosed()) {
         // The original tab keeps sessionStorage while previous requests are released.
         await page.goto('about:blank', { waitUntil: 'commit', timeout: 5000 }).catch(() => {
@@ -298,45 +387,38 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
     }
   }
 
-  let timer
   function closeBrowser() {
     void browser?.close().catch(() => {})
   }
 
   signal.addEventListener('abort', closeBrowser, { once: true })
+  const timer = setInterval(progress, 500)
   try {
+    activity.record('system', 'Запуск захвата')
     progress()
     await ensureChromium(() => {
       phase = 'installingBrowser'
+      activity.record('system', 'Подготавливаем Chromium')
       progress()
     })
     signal.throwIfAborted()
     phase = 'opening'
     progress()
-    browser = await chromium.launch({
-      channel: 'chromium',
-      headless: !login,
-      chromiumSandbox: true,
-      handleSIGINT: false,
-      handleSIGTERM: false,
-      handleSIGHUP: false,
-    }).catch((error) => {
-      if (error.message.includes('Executable doesn\'t exist')) {
-        throw new Error('Chromium не установлен. Выполни npm run browser:install.')
-      }
-      throw error
-    })
+    browser = await launchBrowser({ headless: !login && !manualScene })
     signal.throwIfAborted()
     const context = await browser.newContext({ acceptDownloads: false })
     const loginPage = login ? await context.newPage() : null
     if (loginPage) {
-      await waitForLogin(loginPage, url.href, () => {
-        phase = 'awaitingLogin'
-        progress()
+      await loginPage.goto(url.href, { waitUntil: 'commit', timeout: 60_000 }).catch(() => {
+        throw new Error('Не удалось открыть страницу для входа.')
       })
+      await waitForConfirmation(loginPage, () => {
+        phase = 'awaitingLogin'
+        activity.record('system', 'Ожидаем входа в Chromium')
+        progress()
+      }, 'Окно входа закрыто. Запусти захват заново.')
       await loginPage.goto('about:blank', { waitUntil: 'commit', timeout: 5000 })
     }
-    timer = setInterval(progress, 500)
     while (queue.size && currentPage < pageLimit) {
       signal.throwIfAborted()
       const address = queue.values().next().value
@@ -345,6 +427,7 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
       currentUrl = address
       currentPage++
       phase = 'opening'
+      activity.record('page', 'Открываем страницу', currentUrl)
       progress()
       try {
         const page = loginPage ?? await context.newPage()
@@ -352,18 +435,24 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
         await capturePage(page, address)
       } catch (error) {
         signal.throwIfAborted()
+        activity.record('error', 'Не удалось сохранить страницу', currentUrl, error.message)
         if (!(error instanceof PageCaptureError) || currentPage === 1) throw error
         failedPages.push({ url: address, message: error.message })
+      } finally {
+        processedPages++
+        progress()
       }
     }
 
-    clearInterval(timer)
     phase = 'saving'
+    activity.record('system', 'Собираем архив и 3D-ресурсы')
     progress()
     const documents = [...pages.values()]
     const [entry] = documents
     const pageLimitReached = queue.size > 0 && currentPage === pageLimit
+    const sceneAssets = await exportSceneAssets({ staging, assets: new Map([...documents.map(page => [page.url, page]), ...assets]), assetAliases, signal })
     phase = 'offline'
+    activity.record('system', 'Готовим офлайн-копию')
     progress()
     const offlineEntryFile = await createOffline({
       staging, entryUrl: entry.url, snapshots, pages, resources: assets, redirects, assetAliases, offlinePaths, signal,
@@ -373,6 +462,7 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
       finalUrl: entry.url,
       entryFile: entry.file,
       offlineEntryFile,
+      sceneAssets,
       pages: documents,
       redirects,
       resourceRedirects: [...assetAliases].filter(([, finalUrl]) => assets.has(finalUrl))
@@ -383,7 +473,13 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
     }, null, 2) + '\n')
     signal.throwIfAborted()
     await rename(staging, folder)
-    send({ type: 'complete', folder, offlineEntryFile, pageLimitReached, ...counts() })
+    activity.record('system', 'Архив сохранён')
+    progress()
+    send({ type: 'complete', folder, offlineEntryFile, sceneAssets, pageLimitReached, ...counts() })
+  } catch (error) {
+    activity.record('system', signal.aborted ? 'Захват отменён' : 'Захват остановлен')
+    progress()
+    throw error
   } finally {
     clearInterval(timer)
     signal.removeEventListener('abort', closeBrowser)
@@ -393,7 +489,18 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
 }
 
 const [target, directory, waitSeconds, pageLimit = '1', options = '{}'] = process.argv.slice(2)
-Promise.resolve().then(() => capture(target, directory, Number(waitSeconds), Number(pageLimit), JSON.parse(options))).catch((error) => {
+async function run() {
+  if (target === '--replay') {
+    await ensureChromium(() => send({ type: 'replayInstalling' }))
+    await replay(directory, { launch: launchBrowser, signal, send, useOriginalAddress: waitSeconds === 'original' })
+    signal.throwIfAborted()
+    send({ type: 'complete' })
+  } else {
+    await capture(target, directory, Number(waitSeconds), Number(pageLimit), JSON.parse(options))
+  }
+}
+
+run().catch((error) => {
   if (signal.aborted) {
     send({ type: 'cancelled' })
   } else {

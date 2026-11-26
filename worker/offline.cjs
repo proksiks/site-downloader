@@ -10,10 +10,10 @@ const removeTags = new Set(['script', 'base', 'iframe', 'frame', 'object', 'embe
 const resourceAttributes = new Set(['src', 'poster', 'background'])
 const policy = [
   "default-src 'none'",
-  "img-src file: data:",
-  "style-src file: 'unsafe-inline'",
-  "font-src file: data:",
-  "media-src file: data:",
+  "img-src 'self' file: data:",
+  "style-src 'self' file: 'unsafe-inline'",
+  "font-src 'self' file: data:",
+  "media-src 'self' file: data:",
   "form-action 'none'",
   "base-uri 'none'",
 ].join('; ')
@@ -28,6 +28,7 @@ function resourcePath(value, source, output, destinations) {
     target.hash = ''
     const path = destinations.get(target.href)
     if (!path) return null
+    if (path.startsWith('data:')) return path
     const relative = posix.relative(posix.dirname(output), path)
     return relative.split('/').map(encodeURIComponent).join('/') + hash
   } catch {
@@ -159,6 +160,16 @@ async function createOffline({ staging, entryUrl, snapshots, pages, resources, r
     if (extension) localAssets.set(asset.url, offlinePaths.asset(asset.url, asset.contentType, extension))
   }
   const assets = new Map(localAssets)
+  const fontTypes = { '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf' }
+  for (const [url, path] of localAssets) {
+    signal.throwIfAborted()
+    const type = fontTypes[extname(path).toLowerCase()]
+    const asset = resources.get(url)
+    if (type && asset.bytes <= 1024 * 1024) {
+      const font = await readFile(join(staging, asset.file))
+      assets.set(url, `data:${type};base64,${font.toString('base64')}`)
+    }
+  }
   for (const [source, destination] of assetAliases) {
     if (assets.has(destination) && !assets.has(source)) assets.set(source, assets.get(destination))
   }

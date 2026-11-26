@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
+import { formatCaptureBytes, type CaptureActivity, type CaptureEntry } from '~/utils/capture-display'
 
-type Counts = { pages: number; failedPages: number; files: number; bytes: number; skipped: number }
-type CapturePhase = 'opening' | 'installingBrowser' | 'awaitingLogin' | 'capturing' | 'saving' | 'offline'
+type Counts = { pages: number; failedPages: number; failedResources?: number; files: number; bytes: number; skipped: number }
+type CapturePhase = 'opening' | 'installingBrowser' | 'awaitingLogin' | 'awaitingScene' | 'capturing' | 'saving' | 'offline'
+type SceneAssets = { manifest: string; models: number; textures: number }
+type ArchiveInfo = { folder: string; offlineHtml: string | null; hasSceneAssets: boolean }
+type ArchiveAction = 'localHtml' | 'folder' | 'sceneAssets'
 type CaptureEvent =
-  | ({ type: 'progress'; phase: CapturePhase; currentUrl: string; currentPage: number } & Counts)
-  | ({ type: 'complete'; folder: string; offlineEntryFile: string | null; pageLimitReached: boolean } & Counts)
+  | ({ type: 'progress'; phase: CapturePhase; currentUrl: string; currentPage: number; activity: CaptureActivity } & Counts)
+  | ({ type: 'complete'; folder: string; offlineEntryFile: string | null; sceneAssets: SceneAssets | null; pageLimitReached: boolean } & Counts)
   | { type: 'cancelled' }
 
 useHead({ title: 'Site Downloader', htmlAttrs: { lang: 'ru' } })
@@ -19,6 +23,7 @@ const login = ref(false)
 const includePaths = ref('')
 const excludePaths = ref('/logout\n/signout')
 const skipVideo = ref(false)
+const manualScene = ref(false)
 const running = ref(false)
 const choosing = ref(false)
 const cancelling = ref(false)
@@ -29,11 +34,25 @@ const emptyCounts: Counts = { pages: 0, failedPages: 0, files: 0, bytes: 0, skip
 const counts = ref<Counts>(emptyCounts)
 const currentUrl = ref('')
 const currentPage = ref(0)
+const activity = ref<CaptureActivity>()
+const captureEntries = ref<CaptureEntry[]>([])
+const omittedEntries = ref(0)
+const captureRun = ref(0)
 const pageLimitReached = ref(false)
 const resultFolder = ref('')
 const offlineEntryFile = ref<string | null>(null)
+const sceneAssets = ref<SceneAssets | null>(null)
 const error = ref('')
 const archiveError = ref('')
+const replayError = ref('')
+const replayStatus = ref('')
+const replayUrl = ref('')
+const useOriginalReplayAddress = ref(false)
+const replayMissing = ref<{ url: string; resourceType: string }[]>([])
+const previewing = ref(false)
+const choosingArchive = ref(false)
+const selectedArchive = ref<ArchiveInfo | null>(null)
+const archiveBrowser = ref<{ show: (directory: string) => Promise<void> } | null>(null)
 const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
 
 const status = computed(() => ({
@@ -41,6 +60,7 @@ const status = computed(() => ({
   opening: 'Открываем страницу',
   installingBrowser: 'Скачиваем Chromium',
   awaitingLogin: 'Ожидаем входа',
+  awaitingScene: 'Записываем 3D-сцену',
   capturing: 'Собираем ресурсы',
   saving: 'Завершаем сохранение',
   offline: 'Готовим офлайн-версию',
@@ -49,13 +69,7 @@ const status = computed(() => ({
   error: 'Ошибка захвата',
 })[phase.value])
 
-const size = computed(() => {
-  const { bytes } = counts.value
-  if (bytes >= 1024 ** 3) return `${number.format(bytes / 1024 ** 3)} ГБ`
-  if (bytes >= 1024 ** 2) return `${number.format(bytes / 1024 ** 2)} МБ`
-  if (bytes >= 1024) return `${number.format(bytes / 1024)} КБ`
-  return `${number.format(bytes)} Б`
-})
+const size = computed(() => formatCaptureBytes(counts.value.bytes))
 
 async function chooseDirectory() {
   choosing.value = true
@@ -94,9 +108,14 @@ async function start() {
   counts.value = emptyCounts
   currentUrl.value = ''
   currentPage.value = 0
+  activity.value = undefined
+  captureEntries.value = []
+  omittedEntries.value = 0
+  captureRun.value++
   pageLimitReached.value = false
   resultFolder.value = ''
   offlineEntryFile.value = null
+  sceneAssets.value = null
   archiveError.value = ''
   running.value = true
   const events = new Channel<CaptureEvent>()
@@ -112,18 +131,27 @@ async function start() {
       files: event.files,
       bytes: event.bytes,
       skipped: event.skipped,
+      failedResources: event.failedResources,
     }
     if (event.type === 'complete') {
       resultFolder.value = event.folder
       offlineEntryFile.value = event.offlineEntryFile
+      sceneAssets.value = event.sceneAssets
       pageLimitReached.value = event.pageLimitReached
       phase.value = 'complete'
       canCancel.value = false
     } else {
+      if (phase.value !== event.phase) confirming.value = false
       phase.value = event.phase
       currentUrl.value = event.currentUrl
       currentPage.value = event.currentPage
       canCancel.value = true
+      if (event.activity) {
+        activity.value = event.activity
+        const updated = [...event.activity.entries.slice().reverse(), ...captureEntries.value]
+        captureEntries.value = updated.slice(0, 200)
+        omittedEntries.value += event.activity.omitted + Math.max(0, updated.length - 200)
+      }
     }
   }
 
@@ -139,6 +167,7 @@ async function start() {
           includePaths: includePaths.value,
           excludePaths: excludePaths.value,
           skipVideo: skipVideo.value,
+          manualScene: manualScene.value,
         },
       },
       events,
@@ -154,7 +183,7 @@ async function start() {
   }
 }
 
-async function confirmLogin() {
+async function confirmCaptureStep() {
   confirming.value = true
   error.value = ''
   try {
@@ -175,12 +204,68 @@ async function cancel() {
   }
 }
 
-async function openArchive(offlinePreview: boolean) {
+async function openArchive(directory: string, action: ArchiveAction) {
   archiveError.value = ''
   try {
-    await invoke('open_archive', { offlinePreview })
+    await invoke('open_archive', { directory, action })
   } catch (cause) {
     archiveError.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function chooseArchive() {
+  if (choosingArchive.value) return
+  archiveError.value = ''
+  choosingArchive.value = true
+  try {
+    const directory = await open({ directory: true, multiple: false, title: 'Выбери папку с manifest.json' })
+    if (directory) selectedArchive.value = await invoke<ArchiveInfo>('inspect_archive', { directory })
+  } catch (cause) {
+    archiveError.value = String(cause)
+  } finally {
+    choosingArchive.value = false
+  }
+}
+
+async function replayArchive(directory: string) {
+  if (previewing.value) return
+  replayError.value = ''
+  previewing.value = true
+  replayMissing.value = []
+  replayUrl.value = ''
+  replayStatus.value = 'Открываем Chromium…'
+  const events = new Channel<
+    { type: 'replayReady'; url: string } | { type: 'replayInstalling' } |
+    { type: 'replayMissing'; url: string; resourceType: string }
+  >()
+  events.onmessage = (event) => {
+    if (event.type === 'replayMissing') {
+      replayMissing.value.push({ url: event.url, resourceType: event.resourceType })
+      return
+    }
+    if (event.type === 'replayReady') {
+      replayStatus.value = 'Офлайн-архив открыт в Chromium'
+      replayUrl.value = event.url
+    } else {
+      replayStatus.value = 'Скачиваем Chromium…'
+    }
+  }
+  try {
+    await invoke('replay_archive', { directory, events, useOriginalAddress: useOriginalReplayAddress.value })
+  } catch (cause) {
+    replayError.value = String(cause)
+  } finally {
+    previewing.value = false
+    replayStatus.value = ''
+    replayUrl.value = ''
+  }
+}
+
+async function stopReplay() {
+  try {
+    await invoke('stop_replay')
+  } catch (cause) {
+    if (previewing.value) replayError.value = String(cause)
   }
 }
 </script>
@@ -257,6 +342,14 @@ async function openArchive(offlinePreview: boolean) {
           Войди на сайте в окне Chromium и вернись в приложение. Архив может содержать данные твоего аккаунта.
         </p>
 
+        <label class="capture-checkbox mt-3">
+          <input v-model="manualScene" type="checkbox" :disabled="running || choosing">
+          Ручной захват 3D-сцены
+        </label>
+        <p v-if="manualScene" class="mt-2 text-xs muted">
+          Покрути сцену и открой нужные объекты в Chromium. Стартовая страница записывается, пока ты не завершишь захват вручную.
+        </p>
+
         <details class="capture-filters mt-4">
           <summary>Фильтры обхода</summary>
           <fieldset class="mt-3 grid gap-3 sm:grid-cols-2" :disabled="running || choosing">
@@ -280,14 +373,17 @@ async function openArchive(offlinePreview: boolean) {
 
         <div v-if="error" class="error mt-4" role="alert">{{ error }}</div>
         <div class="capture-actions mt-5 flex flex-wrap items-center gap-3">
-          <button v-if="phase === 'awaitingLogin'" type="button" class="primary" :disabled="confirming || cancelling" @click="confirmLogin">
+          <button v-if="phase === 'awaitingLogin'" type="button" class="primary" :disabled="confirming || cancelling" @click="confirmCaptureStep">
             {{ confirming ? 'Продолжаем…' : 'Я вошёл, начать захват' }}
+          </button>
+          <button v-else-if="phase === 'awaitingScene'" type="button" class="primary" :disabled="confirming || cancelling" @click="confirmCaptureStep">
+            {{ confirming ? 'Завершаем…' : 'Завершить захват сцены' }}
           </button>
           <button v-else type="submit" class="primary inline-flex items-center gap-2" :disabled="running || choosing">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 3v12m-4-4 4 4 4-4M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
             </svg>
-            {{ login && !running ? 'Открыть окно входа' : 'Начать захват' }}
+            {{ login && !running ? 'Открыть окно входа' : manualScene && !running ? 'Открыть сцену' : 'Начать захват' }}
           </button>
           <button v-if="running" type="button" class="secondary" :disabled="!canCancel || cancelling" @click="cancel">
             {{ cancelling ? 'Отменяем…' : 'Отменить' }}
@@ -303,32 +399,74 @@ async function openArchive(offlinePreview: boolean) {
             {{ status }}
           </div>
         </div>
-        <div v-if="running && phase !== 'awaitingLogin'" class="progress-track mt-4" role="progressbar" aria-label="Захват выполняется">
+        <div v-if="running && !activity" class="progress-track mt-4" role="progressbar" aria-label="Подготовка захвата">
           <div />
         </div>
-        <p v-if="running && currentPage && (phase === 'opening' || phase === 'capturing')" class="mt-3 text-xs muted">
-          <span class="font-semibold">Страница {{ currentPage }} · лимит {{ pageLimit }}</span>
-          <span class="mt-1 block truncate" :title="currentUrl">{{ currentUrl }}</span>
-        </p>
         <dl class="stats mt-4 grid grid-cols-2 gap-2">
           <div><dt>Страницы</dt><dd>{{ number.format(counts.pages) }}</dd></div>
           <div><dt>Файлы</dt><dd>{{ number.format(counts.files) }}</dd></div>
           <div><dt>Объём</dt><dd>{{ size }}</dd></div>
-          <div><dt>Ошибки</dt><dd>{{ number.format(counts.failedPages + counts.skipped) }}</dd></div>
+          <div><dt>Ошибки</dt><dd>{{ number.format(counts.failedPages + counts.skipped + (counts.failedResources ?? 0)) }}</dd></div>
         </dl>
+        <CaptureTelemetry v-if="activity" :key="captureRun" :activity="activity" :entries="captureEntries"
+                          :omitted="omittedEntries" :page="currentPage" :address="currentUrl" :phase="phase" :running="running" />
         <div v-if="resultFolder" class="archive-result mt-4">
           <h3 class="text-sm font-semibold">Архив готов</h3>
           <p class="mt-1 break-all font-mono text-xs muted" :title="resultFolder">{{ resultFolder }}</p>
           <div class="mt-3 flex flex-wrap gap-2">
-            <button v-if="offlineEntryFile" type="button" class="primary" @click="openArchive(true)">Смотреть офлайн</button>
-            <button type="button" class="secondary" @click="openArchive(false)">Открыть папку</button>
+            <button type="button" class="primary" :disabled="previewing" @click="replayArchive(resultFolder)">Запустить с JavaScript</button>
+            <button type="button" class="secondary" @click="archiveBrowser?.show(resultFolder)">Файлы архива</button>
+            <button v-if="offlineEntryFile" type="button" class="secondary" @click="openArchive(resultFolder, 'localHtml')">Открыть HTML-снимок</button>
+            <button type="button" class="secondary" @click="openArchive(resultFolder, 'folder')">Открыть папку</button>
+            <button v-if="sceneAssets" type="button" class="secondary" @click="openArchive(resultFolder, 'sceneAssets')">Открыть 3D-файлы</button>
           </div>
-          <p v-if="archiveError" class="error mt-3" role="alert">{{ archiveError }}</p>
+          <p v-if="sceneAssets" class="mt-2 text-xs muted">
+            Модели {{ number.format(sceneAssets.models) }} · Текстуры {{ number.format(sceneAssets.textures) }}
+          </p>
         </div>
         <p v-if="pageLimitReached" class="mt-3 text-xs muted">
           Достигнут лимит страниц. В очереди остались ссылки.
         </p>
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <button type="button" class="secondary" :disabled="choosingArchive" @click="chooseArchive">
+            Выбрать папку архива…
+          </button>
+          <button v-if="previewing" type="button" class="text-action" @click="stopReplay">Закрыть просмотр</button>
+        </div>
+        <div v-if="selectedArchive" class="archive-result mt-3">
+          <h3 class="text-sm font-semibold">Выбранный архив</h3>
+          <p class="mt-1 break-all font-mono text-xs muted">{{ selectedArchive.folder }}</p>
+          <p v-if="selectedArchive.offlineHtml" class="mt-1 break-all font-mono text-xs muted">{{ selectedArchive.offlineHtml }}</p>
+          <p v-else class="mt-2 text-xs muted">В папке нет статического HTML-снимка. Запуск с JavaScript доступен.</p>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button type="button" class="primary" @click="archiveBrowser?.show(selectedArchive.folder)">Файлы архива</button>
+            <button type="button" class="secondary" :disabled="previewing" @click="replayArchive(selectedArchive.folder)">Запустить с JavaScript</button>
+            <button v-if="selectedArchive.offlineHtml" type="button" class="secondary" @click="openArchive(selectedArchive.folder, 'localHtml')">Открыть HTML-снимок</button>
+            <button type="button" class="secondary" @click="openArchive(selectedArchive.folder, 'folder')">Открыть папку</button>
+            <button v-if="selectedArchive.hasSceneAssets" type="button" class="secondary" @click="openArchive(selectedArchive.folder, 'sceneAssets')">Открыть 3D-файлы</button>
+          </div>
+        </div>
+        <div v-if="resultFolder || selectedArchive" class="mt-3">
+          <label class="capture-checkbox">
+            <input v-model="useOriginalReplayAddress" type="checkbox" :disabled="previewing">
+            Использовать исходный адрес
+          </label>
+          <p class="mt-1 text-xs muted">Включи, если скрипты сайта зависят от его домена. HTML-снимок открывается без скриптов.</p>
+        </div>
+        <p v-if="archiveError" class="error mt-2" role="alert">{{ archiveError }}</p>
+        <p v-if="replayStatus" class="mt-2 text-xs muted" role="status">{{ replayStatus }}</p>
+        <p v-if="replayUrl" class="mt-1 break-all font-mono text-xs muted">{{ replayUrl }}</p>
+        <p v-if="replayError" class="error mt-2" role="alert">{{ replayError }}</p>
+        <details v-if="replayMissing.length" class="capture-filters mt-4">
+          <summary>Не хватило ресурсов ({{ replayMissing.length }}{{ replayMissing.length === 100 ? '+' : '' }})</summary>
+          <ul class="mt-2 max-h-40 space-y-2 overflow-auto text-xs muted">
+            <li v-for="item in replayMissing" :key="item.url" class="break-all">
+              <span class="font-semibold">{{ item.resourceType }}</span> · {{ item.url }}
+            </li>
+          </ul>
+        </details>
       </section>
     </div>
   </main>
+  <ArchiveBrowser ref="archiveBrowser" />
 </template>

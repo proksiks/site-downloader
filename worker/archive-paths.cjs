@@ -5,10 +5,13 @@ const extensions = new Map(Object.entries({
   'application/javascript': '.js', 'text/javascript': '.js', 'application/ecmascript': '.js',
   'application/json': '.json', 'text/plain': '.txt', 'text/html': '.html', 'application/xhtml+xml': '.xhtml',
   'application/pdf': '.pdf', 'application/wasm': '.wasm', 'application/xml': '.xml', 'text/xml': '.xml',
+  'model/gltf+json': '.gltf', 'model/gltf-binary': '.glb', 'model/obj': '.obj', 'model/stl': '.stl',
+  'model/vnd.usdz+zip': '.usdz', 'application/gltf-buffer': '.bin',
   'text/css': '.css', 'text/csv': '.csv', 'application/manifest+json': '.webmanifest',
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
   'image/svg+xml': '.svg', 'image/avif': '.avif', 'image/bmp': '.bmp', 'image/x-icon': '.ico',
   'image/vnd.microsoft.icon': '.ico', 'image/tiff': '.tiff', 'font/woff': '.woff', 'font/woff2': '.woff2',
+  'image/ktx': '.ktx', 'image/ktx2': '.ktx2',
   'font/ttf': '.ttf', 'font/otf': '.otf', 'application/font-woff': '.woff',
   'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/wav': '.wav', 'audio/aac': '.aac',
   'audio/mp4': '.m4a', 'audio/webm': '.webm', 'video/mp4': '.mp4', 'video/webm': '.webm',
@@ -24,7 +27,7 @@ function contentExtension(contentType) {
 }
 
 function isPreviewType(type) {
-  return /^(?:image|font|audio|video)\//.test(type) ||
+  return (type !== 'image/ktx' && type !== 'image/ktx2' && /^(?:image|font|audio|video)\//.test(type)) ||
     ['text/css', 'text/vtt', 'application/font-woff'].includes(type)
 }
 
@@ -120,7 +123,7 @@ class ArchivePaths {
   }
 
   constructor() {
-    for (const name of ['assets', 'offline', 'manifest.json']) {
+    for (const name of ['assets', 'offline', '3d', 'manifest.json']) {
       this.#claim('', name, 'reserved:' + name)
     }
   }

@@ -3,6 +3,7 @@
 use std::{
     env,
     ffi::OsString,
+    fs,
     io::{BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
@@ -14,15 +15,20 @@ use serde_json::Value;
 use tauri::{ipc::Channel, path::BaseDirectory, AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
+mod archive_browser;
+
 #[derive(Default)]
 struct CaptureState(Mutex<Option<ChildStdin>>);
 
 #[derive(Default)]
-struct ArchiveState(Mutex<Option<ArchivePaths>>);
+struct ReplayState(Mutex<Option<ChildStdin>>);
 
-struct ArchivePaths {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveInfo {
     folder: PathBuf,
-    offline_entry: Option<PathBuf>,
+    offline_html: Option<PathBuf>,
+    has_scene_assets: bool,
 }
 
 fn offline_entry(file: &str) -> Option<PathBuf> {
@@ -35,6 +41,50 @@ fn offline_entry(file: &str) -> Option<PathBuf> {
         return None;
     }
     Some(path.to_path_buf())
+}
+
+fn archive_file(root: &Path, path: &Path) -> bool {
+    root.join(path)
+        .canonicalize()
+        .is_ok_and(|file| file.starts_with(root) && file.is_file())
+}
+
+fn read_archive_manifest(directory: &Path) -> Result<(PathBuf, Value), String> {
+    if !directory.is_absolute() {
+        return Err("Выбери папку архива.".into());
+    }
+    let root = directory
+        .canonicalize()
+        .map_err(|_| "Не удалось открыть папку архива.")?;
+    let manifest_path = Path::new("manifest.json");
+    if !archive_file(&root, manifest_path) {
+        return Err("Выбери папку архива, в которой находится manifest.json.".into());
+    }
+    let content =
+        fs::read(root.join(manifest_path)).map_err(|_| "Не удалось прочитать manifest.json.")?;
+    let manifest: Value =
+        serde_json::from_slice(&content).map_err(|_| "В manifest.json ошибочный формат.")?;
+    if !manifest["files"].is_array() {
+        return Err("В manifest.json нет списка файлов архива.".into());
+    }
+    Ok((root, manifest))
+}
+
+fn read_archive_info(directory: PathBuf) -> Result<ArchiveInfo, String> {
+    let (root, manifest) = read_archive_manifest(&directory)?;
+    let offline_html = manifest["offlineEntryFile"]
+        .as_str()
+        .and_then(offline_entry)
+        .filter(|path| archive_file(&root, path))
+        .or_else(|| {
+            let default = PathBuf::from("offline/index.html");
+            archive_file(&root, &default).then_some(default)
+        });
+    Ok(ArchiveInfo {
+        folder: directory,
+        offline_html,
+        has_scene_assets: archive_file(&root, Path::new("3d/manifest.json")),
+    })
 }
 
 #[derive(Deserialize)]
@@ -55,6 +105,7 @@ struct CaptureOptions {
     include_paths: String,
     exclude_paths: String,
     skip_video: bool,
+    manual_scene: bool,
 }
 
 fn node_candidates(app: &AppHandle) -> Vec<OsString> {
@@ -110,21 +161,24 @@ fn bundled_node(app: &AppHandle) -> Option<PathBuf> {
         .filter(|path| path.is_file())
 }
 
-fn spawn_worker(app: &AppHandle, script: &Path, request: &CaptureRequest) -> Result<Child, String> {
-    let options = serde_json::to_string(&request.options).map_err(|error| error.to_string())?;
+fn spawn_worker(app: &AppHandle, arguments: &[OsString]) -> Result<Child, String> {
+    let script = if tauri::is_dev() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/capture.cjs")
+    } else {
+        app.path()
+            .resolve("capture.cjs", BaseDirectory::Resource)
+            .map_err(|error| error.to_string())?
+    };
+    let packaged = bundled_node(app).is_some();
     for node in node_candidates(app) {
         let mut command = Command::new(node);
         command
-            .arg(script)
-            .arg(&request.url)
-            .arg(&request.directory)
-            .arg(request.wait_seconds.to_string())
-            .arg(request.page_limit.to_string())
-            .arg(&options)
+            .arg(&script)
+            .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        if bundled_node(app).is_some() {
+        if packaged {
             command.env("SITE_DOWNLOADER_AUTO_INSTALL_BROWSER", "1");
         }
         #[cfg(windows)]
@@ -156,19 +210,22 @@ fn run_capture(
         return Err("Укажи лимит от 1 до 100 страниц.".into());
     }
 
-    let script = if tauri::is_dev() {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../worker/capture.cjs")
-    } else {
-        app.path()
-            .resolve("capture.cjs", BaseDirectory::Resource)
-            .map_err(|error| error.to_string())?
-    };
     let state = app.state::<CaptureState>();
     let mut active = state.0.lock().map_err(|error| error.to_string())?;
     if active.is_some() {
         return Err("Захват уже запущен.".into());
     }
-    let mut child = spawn_worker(&app, &script, &request)?;
+    let options = serde_json::to_string(&request.options).map_err(|error| error.to_string())?;
+    let mut child = spawn_worker(
+        &app,
+        &[
+            request.url.into(),
+            request.directory.into_os_string(),
+            request.wait_seconds.to_string().into(),
+            request.page_limit.to_string().into(),
+            options.into(),
+        ],
+    )?;
     let stdout = child.stdout.take().expect("worker stdout is piped");
     *active = Some(child.stdin.take().expect("worker stdin is piped"));
     drop(active);
@@ -180,22 +237,7 @@ fn run_capture(
             continue;
         };
         match event["type"].as_str() {
-            Some("complete") => {
-                if let Some(folder) = event["folder"].as_str() {
-                    if let Ok(mut archive) = app.state::<ArchiveState>().0.lock() {
-                        *archive = Some(ArchivePaths {
-                            folder: PathBuf::from(folder),
-                            offline_entry: event["offlineEntryFile"]
-                                .as_str()
-                                .and_then(offline_entry),
-                        });
-                    }
-                }
-                finished = true;
-                result = Ok(());
-                let _ = events.send(event);
-            }
-            Some("cancelled") => {
+            Some("complete" | "cancelled") => {
                 finished = true;
                 result = Ok(());
                 let _ = events.send(event);
@@ -234,44 +276,142 @@ async fn start_capture(
         .map_err(|error| error.to_string())?
 }
 
-fn send_worker_command(state: &CaptureState, command: &[u8]) -> Result<(), String> {
-    let mut active = state.0.lock().map_err(|error| error.to_string())?;
-    let stdin = active.as_mut().ok_or("Захват уже завершился.")?;
+fn send_worker_command(state: &Mutex<Option<ChildStdin>>, command: &[u8]) -> Result<(), String> {
+    let mut active = state.lock().map_err(|error| error.to_string())?;
+    let stdin = active.as_mut().ok_or("Процесс уже завершился.")?;
     stdin.write_all(command).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn continue_capture(state: State<'_, CaptureState>) -> Result<(), String> {
-    send_worker_command(&state, b"continue\n")
+    send_worker_command(&state.0, b"continue\n")
 }
 
 #[tauri::command]
 fn cancel_capture(state: State<'_, CaptureState>) -> Result<(), String> {
-    send_worker_command(&state, b"cancel\n")
+    send_worker_command(&state.0, b"cancel\n")
+}
+
+fn run_replay(
+    app: AppHandle,
+    directory: PathBuf,
+    events: Channel<Value>,
+    use_original_address: bool,
+) -> Result<(), String> {
+    if !directory.is_absolute() || !directory.join("manifest.json").is_file() {
+        return Err("Выбери папку архива, в которой находится manifest.json.".into());
+    }
+    let state = app.state::<ReplayState>();
+    let mut active = state.0.lock().map_err(|error| error.to_string())?;
+    if active.is_some() {
+        return Err("Интерактивный просмотр уже открыт.".into());
+    }
+    let address_mode = if use_original_address {
+        "original"
+    } else {
+        "local"
+    };
+    let mut child = spawn_worker(
+        &app,
+        &[
+            "--replay".into(),
+            directory.into_os_string(),
+            address_mode.into(),
+        ],
+    )?;
+    let stdout = child.stdout.take().expect("worker stdout is piped");
+    *active = Some(child.stdin.take().expect("worker stdin is piped"));
+    drop(active);
+
+    let mut outcome = Err("Не удалось запустить интерактивный просмотр.".to_string());
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("complete" | "cancelled") => outcome = Ok(()),
+            Some("error") => {
+                if let Some(message) = event["message"].as_str() {
+                    outcome = Err(message.to_string());
+                }
+            }
+            _ => {
+                let _ = events.send(event);
+            }
+        }
+    }
+    let exit = child.wait();
+    state.0.lock().map_err(|error| error.to_string())?.take();
+    exit.map_err(|error| error.to_string())?;
+    outcome
 }
 
 #[tauri::command]
-fn open_archive(
+async fn replay_archive(
     app: AppHandle,
-    state: State<'_, ArchiveState>,
-    offline_preview: bool,
+    directory: PathBuf,
+    events: Channel<Value>,
+    use_original_address: bool,
 ) -> Result<(), String> {
-    let path = {
-        let archive = state.0.lock().map_err(|error| error.to_string())?;
-        let archive = archive.as_ref().ok_or("Сначала сохрани архив.")?;
-        if offline_preview {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_replay(app, directory, events, use_original_address)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn stop_replay(state: State<'_, ReplayState>) -> Result<(), String> {
+    send_worker_command(&state.0, b"cancel\n")
+}
+
+#[tauri::command]
+fn inspect_archive(directory: PathBuf) -> Result<ArchiveInfo, String> {
+    read_archive_info(directory)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ArchiveAction {
+    LocalHtml,
+    Folder,
+    SceneAssets,
+}
+
+#[tauri::command]
+fn open_archive(app: AppHandle, directory: PathBuf, action: ArchiveAction) -> Result<(), String> {
+    let archive = read_archive_info(directory)?;
+    let path = match action {
+        ArchiveAction::LocalHtml => {
             let entry = archive
-                .offline_entry
-                .as_ref()
-                .ok_or("В этом архиве нет офлайн-страницы.")?;
+                .offline_html
+                .ok_or("В этом архиве нет локальной HTML-копии.")?;
             archive.folder.join(entry)
-        } else {
-            archive.folder.clone()
         }
+        ArchiveAction::SceneAssets if archive.has_scene_assets => archive.folder.join("3d"),
+        ArchiveAction::SceneAssets => return Err("В этом архиве нет папки с 3D-файлами.".into()),
+        ArchiveAction::Folder => archive.folder,
     };
     app.opener()
         .open_path(path.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|error| format!("Не удалось открыть архив. {error}"))
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_html_paths_inside_the_offline_directory() {
+        assert_eq!(
+            offline_entry("offline/docs/guide/index.html"),
+            Some(PathBuf::from("offline/docs/guide/index.html"))
+        );
+        assert_eq!(offline_entry("index.html"), None);
+        assert_eq!(offline_entry("https://example.com/index.html"), None);
+        assert_eq!(offline_entry("offline/../index.html"), None);
+        assert_eq!(offline_entry("offline/assets/script.js"), None);
+    }
 }
 
 fn main() {
@@ -279,12 +419,18 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(CaptureState::default())
-        .manage(ArchiveState::default())
+        .manage(ReplayState::default())
         .invoke_handler(tauri::generate_handler![
             start_capture,
             continue_capture,
             cancel_capture,
-            open_archive
+            replay_archive,
+            stop_replay,
+            inspect_archive,
+            open_archive,
+            archive_browser::list_archive_files,
+            archive_browser::preview_archive_file,
+            archive_browser::reveal_archive_file
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Site Downloader");
