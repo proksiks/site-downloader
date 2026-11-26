@@ -1,0 +1,8 @@
+/.nuxt/
+/.output/
+/dist/
+/dist-worker/
+/node_modules/
+/site/
+/src-tauri/target/
+/src-tauri/gen/

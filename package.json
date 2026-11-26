@@ -1,0 +1,30 @@
+{
+  "name": "site-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "nuxt dev --host 127.0.0.1 --port 1420",
+    "generate": "nuxt generate",
+    "build:worker": "esbuild worker/capture.cjs --bundle --platform=node --target=node22 --external:playwright-core --outfile=dist-worker/capture.cjs",
+    "browser:install": "playwright install chromium --no-shell",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "nuxt": "^4.7.0",
+    "parse-srcset": "^1.0.2",
+    "parse5": "^8.1.1",
+    "playwright": "1.65.1",
+    "postcss": "^8.5.33",
+    "postcss-value-parser": "^4.2.0",
+    "vue": "^3.5.46"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@tauri-apps/cli": "^2.12.6",
+    "esbuild": "^0.28.2",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^6.0.3"
+  }
+}
