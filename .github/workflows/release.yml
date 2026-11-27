@@ -2,6 +2,8 @@ name: Desktop release
 
 "on":
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -19,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+  RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag || '' }}
 
 jobs:
   build:
@@ -111,7 +113,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: github.ref_type == 'tag' || inputs.release_tag != ''
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     needs: build
     runs-on: ubuntu-latest
     permissions:
