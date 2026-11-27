@@ -23,7 +23,8 @@ const commands = new EventEmitter()
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 input.on('line', (command) => {
   if (command === 'cancel') cancellation.abort()
-  if (command === 'continue') commands.emit('continue')
+  else if (command === 'continue') commands.emit('continue')
+  else if (command.startsWith('{')) commands.emit('options', command)
 })
 input.once('close', () => cancellation.abort())
 
@@ -475,7 +476,7 @@ async function capture(target, directory, waitSeconds, pageLimit, options) {
     await rename(staging, folder)
     activity.record('system', 'Архив сохранён')
     progress()
-    send({ type: 'complete', folder, offlineEntryFile, sceneAssets, pageLimitReached, ...counts() })
+    send({ type: 'complete', folder, offlineEntryFile, sceneAssets, pageLimitReached, failedPageEntries: failedPages, ...counts() })
   } catch (error) {
     activity.record('system', signal.aborted ? 'Захват отменён' : 'Захват остановлен')
     progress()
@@ -495,6 +496,14 @@ async function run() {
     await replay(directory, { launch: launchBrowser, signal, send, useOriginalAddress: waitSeconds === 'original' })
     signal.throwIfAborted()
     send({ type: 'complete' })
+  } else if (target === '--repair') {
+    const [payload] = await once(commands, 'options', { signal })
+    const { repairArchive } = require('./repair.cjs')
+    await ensureChromium(() => send({ type: 'repairInstalling' }))
+    const result = await repairArchive(directory, JSON.parse(payload), {
+      launch: launchBrowser, signal, send, waitForConfirmation,
+    })
+    send({ type: 'complete', result })
   } else if (target === '--analyze-js') {
     const { analyzeJavaScript } = require('./analyze-js.cjs')
     send({ type: 'analysis', result: await analyzeJavaScript(directory) })

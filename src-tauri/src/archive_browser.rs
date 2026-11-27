@@ -12,6 +12,7 @@ use tauri_plugin_opener::OpenerExt;
 
 const TEXT_LIMIT: u64 = 256 * 1024;
 const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
+const MODEL_FILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +23,8 @@ pub struct ArchiveFile {
     category: &'static str,
     variant: &'static str,
     preview: Option<&'static str>,
+    content_type: String,
+    aliases: Vec<String>,
 }
 
 fn safe_relative(path: &Path) -> bool {
@@ -74,7 +77,7 @@ fn classify(path: &str, content_type: &str) -> (&'static str, Option<&'static st
     {
         return (
             "scene",
-            if extension == "gltf" {
+            if extension == "gltf" || mime == "model/gltf+json" {
                 Some("text/plain")
             } else {
                 image_preview
@@ -137,6 +140,8 @@ fn collect_files(root: &Path, manifest: &Value) -> BTreeMap<String, ArchiveFile>
             category,
             variant,
             preview,
+            content_type: content_type.to_owned(),
+            aliases: Vec::new(),
         });
     };
 
@@ -169,6 +174,23 @@ fn collect_files(root: &Path, manifest: &Value) -> BTreeMap<String, ArchiveFile>
             }
         }
     }
+    let mut aliases = BTreeMap::<&str, Vec<String>>::new();
+    for redirect in manifest["resourceRedirects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if let (Some(source), Some(target)) =
+            (redirect["url"].as_str(), redirect["finalUrl"].as_str())
+        {
+            aliases.entry(target).or_default().push(source.to_owned());
+        }
+    }
+    for entry in files.values_mut() {
+        if let Some(addresses) = entry.url.as_deref().and_then(|url| aliases.get(url)) {
+            entry.aliases.clone_from(addresses);
+        }
+    }
     files
 }
 
@@ -178,7 +200,7 @@ fn resolve_entry(directory: &Path, path: &str) -> Result<(PathBuf, ArchiveFile),
         .remove(path)
         .filter(|_| archive_file(&root, Path::new(path)))
         .ok_or("Файл архива не найден.")?;
-    Ok((directory.join(path), file))
+    Ok((root.join(path), file))
 }
 
 #[tauri::command]
@@ -208,6 +230,37 @@ pub async fn preview_archive_file(directory: PathBuf, path: String) -> Result<Re
             .map_err(|_| "Не удалось прочитать файл.")?;
         if preview != "text/plain" && bytes.len() as u64 > limit {
             return Err("Картинка больше 8 МБ. Открой её из папки архива.".into());
+        }
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn read_archive_model_file(
+    directory: PathBuf,
+    path: String,
+    limit: u32,
+) -> Result<Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (path, _) = resolve_entry(&directory, &path)?;
+        let limit = u64::from(limit).min(MODEL_FILE_LIMIT);
+        let file = File::open(path).map_err(|_| "Не удалось прочитать файл модели.")?;
+        if file
+            .metadata()
+            .map_err(|_| "Не удалось прочитать файл модели.")?
+            .len()
+            > limit
+        {
+            return Err("Файл превышает лимит предпросмотра.".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Не удалось прочитать файл модели.")?;
+        if bytes.len() as u64 > limit {
+            return Err("Файл превышает лимит предпросмотра.".into());
         }
         Ok(Response::new(bytes))
     })

@@ -215,7 +215,7 @@ async function installReplayRoutes(context, archive, onMissing = () => {}, previ
       (!request.isNavigationRequest() && archive.cache.get(cacheKey(address)))
     const file = item && await archiveFile(archive.folder, item.file)
     if (!file) {
-      onMissing(address.origin + address.pathname, request.resourceType())
+      if (method === 'GET') onMissing(address.origin + address.pathname, request.resourceType(), address.href, documentRequest)
       return route.fulfill({ status: 404, headers, body: 'This URL was not saved in the archive.' })
     }
 
@@ -308,10 +308,12 @@ async function replay(directory, { launch, signal, send, useOriginalAddress = fa
     const context = await browser.newContext({ offline: true, serviceWorkers: 'block', acceptDownloads: false })
     await context.addInitScript(showArchiveMarker)
     const missing = new Set()
-    await installReplayRoutes(context, archive, (url, resourceType) => {
-      if (missing.size >= 100 || missing.has(url)) return
-      missing.add(url)
-      send({ type: 'replayMissing', url, resourceType })
+    await installReplayRoutes(context, archive, (url, resourceType, requestUrl, documentRequest) => {
+      if (missing.size >= 100 || missing.has(requestUrl)) return
+      missing.add(requestUrl)
+      const kind = documentRequest && resourceType === 'document' &&
+        httpUrl(requestUrl)?.origin === archive.entry.origin ? 'page' : 'resource'
+      send({ type: 'replayMissing', url, resourceType, requestUrl, kind })
     }, previewOrigin)
     const page = await context.newPage()
     const closed = once(page, 'close', { signal: lifetime.signal })

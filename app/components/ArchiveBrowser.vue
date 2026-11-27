@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { invoke } from '@tauri-apps/api/core'
 import { captureAddress, formatCaptureBytes } from '~/utils/capture-display'
+import { isArchiveModel, type ModelFile } from '~/utils/archive-model'
+
+const ArchiveModelViewer = defineAsyncComponent(() => import('./ArchiveModelViewer.vue'))
 
 const categories = [
   { id: 'all', label: 'Все' },
@@ -15,12 +18,9 @@ const categories = [
   { id: 'other', label: 'Прочее' },
 ] as const
 type Category = typeof categories[number]['id']
-type ArchiveFile = {
-  path: string
-  url: string | null
+type ArchiveFile = ModelFile & {
   bytes: number | null
   category: Exclude<Category, 'all'>
-  variant: 'original' | 'snapshot' | 'export'
   preview: string | null
 }
 type Shader = {
@@ -43,6 +43,7 @@ const shown = ref(40)
 const loading = ref(false)
 const listError = ref('')
 const selected = ref<ArchiveFile | null>(null)
+const viewModel = ref(false)
 const previewError = ref('')
 const previewLoading = ref(false)
 const source = ref('')
@@ -112,6 +113,7 @@ function clearPreview() {
   previewId++
   if (image.value) URL.revokeObjectURL(image.value)
   selected.value = null
+  viewModel.value = false
   image.value = ''
   source.value = ''
   previewError.value = ''
@@ -278,13 +280,17 @@ function name(path: string) {
           <p v-if="selected.url" class="mt-1 break-all text-xs muted">{{ captureAddress(selected.url) }}</p>
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button" class="secondary" @click="reveal(selected)">Показать файл</button>
+            <button v-if="isArchiveModel(selected)" type="button" class="secondary" :aria-expanded="viewModel" @click="viewModel = !viewModel">
+              {{ viewModel ? 'Закрыть 3D-просмотр' : 'Просмотреть 3D' }}
+            </button>
             <button v-if="selected.category === 'js' && !analysis" type="button" class="secondary" :disabled="analyzing" @click="analyze(selected)">
               {{ analyzing ? 'Разбираем JavaScript…' : 'Разобрать JavaScript' }}
             </button>
           </div>
-          <p v-if="previewLoading" class="mt-3 text-xs muted" role="status">Читаем файл…</p>
+          <p v-if="previewLoading && !viewModel" class="mt-3 text-xs muted" role="status">Читаем файл…</p>
           <p v-if="previewError" class="error mt-3" role="alert">{{ previewError }}</p>
-          <template v-if="analysis">
+          <ArchiveModelViewer v-if="viewModel" :key="selected.path" :directory="folder" :model="selected" :files="files" />
+          <template v-else-if="analysis">
             <div class="mt-3 flex flex-wrap gap-2" aria-label="Результаты разбора">
               <button type="button" class="archive-category" :aria-pressed="analysisTab === 'code'" @click="analysisTab = 'code'">Читаемый код</button>
               <button type="button" class="archive-category" :aria-pressed="analysisTab === 'shaders'" @click="analysisTab = 'shaders'">
@@ -353,7 +359,7 @@ function name(path: string) {
             <pre v-if="source" class="archive-code-preview mt-3">{{ source }}</pre>
             <p v-else class="mt-3 text-xs muted">Файл пуст.</p>
           </template>
-          <p v-else-if="!selected.preview" class="mt-3 text-xs muted">Открой файл из папки архива в подходящей программе.</p>
+          <p v-else-if="!selected.preview && !isArchiveModel(selected)" class="mt-3 text-xs muted">Открой файл из папки архива в подходящей программе.</p>
         </template>
       </section>
     </div>

@@ -23,11 +23,13 @@
     "playwright": "1.65.1",
     "postcss": "^8.5.33",
     "postcss-value-parser": "^4.2.0",
+    "three": "0.187.0",
     "vue": "^3.5.46"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
     "@tauri-apps/cli": "^2.12.6",
+    "@types/three": "0.187.0",
     "esbuild": "^0.28.2",
     "tailwindcss": "^4.3.5",
     "typescript": "^6.0.3"

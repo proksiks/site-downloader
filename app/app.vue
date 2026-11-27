@@ -2,15 +2,17 @@
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import { formatCaptureBytes, type CaptureActivity, type CaptureEntry } from '~/utils/capture-display'
+import type { FailedArchivePage, RepairCandidate, RepairTarget } from '~/utils/archive-repair'
 
 type Counts = { pages: number; failedPages: number; failedResources?: number; files: number; bytes: number; skipped: number }
 type CapturePhase = 'opening' | 'installingBrowser' | 'awaitingLogin' | 'awaitingScene' | 'capturing' | 'saving' | 'offline'
 type SceneAssets = { manifest: string; models: number; textures: number }
-type ArchiveInfo = { folder: string; offlineHtml: string | null; hasSceneAssets: boolean }
+type ArchiveInfo = { folder: string; offlineHtml: string | null; hasSceneAssets: boolean; failedPages: FailedArchivePage[] }
+type ReplayMissing = { type: 'replayMissing'; url: string; resourceType: string; requestUrl: string; kind: RepairTarget['kind'] }
 type ArchiveAction = 'localHtml' | 'folder' | 'sceneAssets'
 type CaptureEvent =
   | ({ type: 'progress'; phase: CapturePhase; currentUrl: string; currentPage: number; activity: CaptureActivity } & Counts)
-  | ({ type: 'complete'; folder: string; offlineEntryFile: string | null; sceneAssets: SceneAssets | null; pageLimitReached: boolean } & Counts)
+  | ({ type: 'complete'; folder: string; offlineEntryFile: string | null; sceneAssets: SceneAssets | null; pageLimitReached: boolean; failedPageEntries: FailedArchivePage[] } & Counts)
   | { type: 'cancelled' }
 
 useHead({ title: 'Site Downloader', htmlAttrs: { lang: 'ru' } })
@@ -40,6 +42,7 @@ const omittedEntries = ref(0)
 const captureRun = ref(0)
 const pageLimitReached = ref(false)
 const resultFolder = ref('')
+const resultFailedPages = ref<FailedArchivePage[]>([])
 const offlineEntryFile = ref<string | null>(null)
 const sceneAssets = ref<SceneAssets | null>(null)
 const error = ref('')
@@ -48,11 +51,13 @@ const replayError = ref('')
 const replayStatus = ref('')
 const replayUrl = ref('')
 const useOriginalReplayAddress = ref(false)
-const replayMissing = ref<{ url: string; resourceType: string }[]>([])
+const replayFolder = ref('')
+const replayMissing = ref<ReplayMissing[]>([])
 const previewing = ref(false)
 const choosingArchive = ref(false)
 const selectedArchive = ref<ArchiveInfo | null>(null)
 const archiveBrowser = ref<{ show: (directory: string) => Promise<void> } | null>(null)
+const archiveRepair = ref<{ show: (directory: string, entries: RepairCandidate[]) => void } | null>(null)
 const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
 
 const status = computed(() => ({
@@ -114,6 +119,7 @@ async function start() {
   captureRun.value++
   pageLimitReached.value = false
   resultFolder.value = ''
+  resultFailedPages.value = []
   offlineEntryFile.value = null
   sceneAssets.value = null
   archiveError.value = ''
@@ -135,6 +141,7 @@ async function start() {
     }
     if (event.type === 'complete') {
       resultFolder.value = event.folder
+      resultFailedPages.value = event.failedPageEntries ?? []
       offlineEntryFile.value = event.offlineEntryFile
       sceneAssets.value = event.sceneAssets
       pageLimitReached.value = event.pageLimitReached
@@ -231,16 +238,17 @@ async function replayArchive(directory: string) {
   if (previewing.value) return
   replayError.value = ''
   previewing.value = true
+  replayFolder.value = directory
   replayMissing.value = []
   replayUrl.value = ''
   replayStatus.value = 'Открываем Chromium…'
   const events = new Channel<
     { type: 'replayReady'; url: string } | { type: 'replayInstalling' } |
-    { type: 'replayMissing'; url: string; resourceType: string }
+    ReplayMissing
   >()
   events.onmessage = (event) => {
     if (event.type === 'replayMissing') {
-      replayMissing.value.push({ url: event.url, resourceType: event.resourceType })
+      replayMissing.value.push(event)
       return
     }
     if (event.type === 'replayReady') {
@@ -258,6 +266,31 @@ async function replayArchive(directory: string) {
     previewing.value = false
     replayStatus.value = ''
     replayUrl.value = ''
+  }
+}
+
+function showRepair(folder: string) {
+  const failed = [
+    ...(folder === resultFolder.value ? resultFailedPages.value : []),
+    ...(folder === selectedArchive.value?.folder ? selectedArchive.value.failedPages ?? [] : []),
+  ]
+  const missing = folder === replayFolder.value ? replayMissing.value : []
+  archiveRepair.value?.show(folder, [
+    ...missing.map(item => ({ url: item.requestUrl, kind: item.kind, description: item.resourceType })),
+    ...failed.map(item => ({ url: item.url, kind: 'page' as const, description: item.message })),
+  ])
+}
+
+function removeRepaired(folder: string, targets: RepairTarget[]) {
+  const pages = new Set(targets.filter(item => item.kind === 'page').map(item => item.url))
+  const stillFailed = (item: FailedArchivePage) => !pages.has(item.url.split('#')[0] ?? item.url)
+  if (folder === resultFolder.value) resultFailedPages.value = resultFailedPages.value.filter(stillFailed)
+  if (folder === selectedArchive.value?.folder) {
+    selectedArchive.value.failedPages = (selectedArchive.value.failedPages ?? []).filter(stillFailed)
+  }
+  if (folder === replayFolder.value) {
+    const repaired = new Set(targets.map(item => item.kind + ':' + item.url))
+    replayMissing.value = replayMissing.value.filter(item => !repaired.has(item.kind + ':' + item.requestUrl))
   }
 }
 
@@ -280,6 +313,7 @@ async function stopReplay() {
       </div>
       <span class="min-w-0 truncate font-semibold tracking-tight">Site Downloader</span>
       <div class="ml-auto flex shrink-0 items-center gap-2">
+        <AppUpdates :busy="running || previewing" />
         <AppHelp />
         <AppearanceSettings />
       </div>
@@ -419,6 +453,7 @@ async function stopReplay() {
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button" class="primary" :disabled="previewing" @click="replayArchive(resultFolder)">Запустить с JavaScript</button>
             <button type="button" class="secondary" @click="archiveBrowser?.show(resultFolder)">Файлы архива</button>
+            <button v-if="resultFailedPages.length" type="button" class="secondary" @click="showRepair(resultFolder)">Докачать пропущенное</button>
             <button v-if="offlineEntryFile" type="button" class="secondary" @click="openArchive(resultFolder, 'localHtml')">Открыть HTML-снимок</button>
             <button type="button" class="secondary" @click="openArchive(resultFolder, 'folder')">Открыть папку</button>
             <button v-if="sceneAssets" type="button" class="secondary" @click="openArchive(resultFolder, 'sceneAssets')">Открыть 3D-файлы</button>
@@ -443,6 +478,7 @@ async function stopReplay() {
           <p v-else class="mt-2 text-xs muted">В папке нет статического HTML-снимка. Запуск с JavaScript доступен.</p>
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button" class="primary" @click="archiveBrowser?.show(selectedArchive.folder)">Файлы архива</button>
+            <button v-if="selectedArchive.failedPages?.length" type="button" class="secondary" @click="showRepair(selectedArchive.folder)">Докачать пропущенное</button>
             <button type="button" class="secondary" :disabled="previewing" @click="replayArchive(selectedArchive.folder)">Запустить с JavaScript</button>
             <button v-if="selectedArchive.offlineHtml" type="button" class="secondary" @click="openArchive(selectedArchive.folder, 'localHtml')">Открыть HTML-снимок</button>
             <button type="button" class="secondary" @click="openArchive(selectedArchive.folder, 'folder')">Открыть папку</button>
@@ -460,16 +496,13 @@ async function stopReplay() {
         <p v-if="replayStatus" class="mt-2 text-xs muted" role="status">{{ replayStatus }}</p>
         <p v-if="replayUrl" class="mt-1 break-all font-mono text-xs muted">{{ replayUrl }}</p>
         <p v-if="replayError" class="error mt-2" role="alert">{{ replayError }}</p>
-        <details v-if="replayMissing.length" class="capture-filters mt-4">
-          <summary>Не хватило ресурсов ({{ replayMissing.length }}{{ replayMissing.length === 100 ? '+' : '' }})</summary>
-          <ul class="mt-2 max-h-40 space-y-2 overflow-auto text-xs muted">
-            <li v-for="item in replayMissing" :key="item.url" class="break-all">
-              <span class="font-semibold">{{ item.resourceType }}</span> · {{ item.url }}
-            </li>
-          </ul>
-        </details>
+        <div v-if="replayMissing.length" class="archive-result mt-4">
+          <p class="text-sm font-semibold">Не хватило ресурсов ({{ replayMissing.length }}{{ replayMissing.length === 100 ? '+' : '' }})</p>
+          <button type="button" class="secondary mt-2" @click="showRepair(replayFolder)">Докачать пропущенное</button>
+        </div>
       </section>
     </div>
   </main>
   <ArchiveBrowser ref="archiveBrowser" />
+  <ArchiveRepair ref="archiveRepair" :wait-seconds="waitSeconds" @repaired="removeRepaired" />
 </template>

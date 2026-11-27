@@ -32,21 +32,31 @@ jobs:
           - platform: windows-x64
             runner: windows-2022
             bundles: nsis
-            assets: src-tauri/target/release/bundle/nsis/*.exe
+            assets: |
+              src-tauri/target/release/bundle/nsis/*.exe
+              src-tauri/target/release/bundle/nsis/*.exe.sig
           - platform: linux-x64
             runner: ubuntu-22.04
             bundles: deb,appimage
             assets: |
               src-tauri/target/release/bundle/deb/*.deb
+              src-tauri/target/release/bundle/deb/*.deb.sig
               src-tauri/target/release/bundle/appimage/*.AppImage
+              src-tauri/target/release/bundle/appimage/*.AppImage.sig
           - platform: macos-arm64
             runner: macos-15
-            bundles: dmg
-            assets: src-tauri/target/release/bundle/dmg/*.dmg
+            bundles: app,dmg
+            assets: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+              src-tauri/target/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
           - platform: macos-x64
             runner: macos-15-intel
-            bundles: dmg
-            assets: src-tauri/target/release/bundle/dmg/*.dmg
+            bundles: app,dmg
+            assets: |
+              src-tauri/target/release/bundle/dmg/*.dmg
+              src-tauri/target/release/bundle/macos/*.app.tar.gz
+              src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
 
     steps:
       - uses: actions/checkout@v7
@@ -70,10 +80,22 @@ jobs:
         run: GITHUB_REF_NAME="$RELEASE_TAG" node scripts/check-release-version.cjs
       - run: npm ci
       - name: Build installer
+        if: env.RELEASE_TAG == ''
         env:
           BUNDLES: ${{ matrix.bundles }}
         shell: bash
         run: npm run release:build -- --bundles "$BUNDLES" -- --locked
+      - name: Build installers and sign updater bundles
+        if: env.RELEASE_TAG != ''
+        env:
+          BUNDLES: ${{ matrix.bundles }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          node scripts/updater-release.cjs config > "$RUNNER_TEMP/tauri-updater.json"
+          npm run release:build -- --config "$RUNNER_TEMP/tauri-updater.json" --bundles "$BUNDLES" -- --locked
       - name: Remove duplicate volume icon from macOS installers
         if: runner.os == 'macOS'
         shell: bash
@@ -95,6 +117,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@v8
         with:
           pattern: site-downloader-*
@@ -104,21 +133,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
         run: |
-          mapfile -d '' files < <(find release-assets -type f \( -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' \) -print0)
-          if [ "${#files[@]}" -ne 5 ]; then
-            echo "Expected five desktop installers, got ${#files[@]}."
-            exit 1
-          fi
+          node scripts/updater-release.cjs stage release-assets publish-assets "$RELEASE_TAG"
           labeled_files=()
-          for file in "${files[@]}"; do
+          for file in publish-assets/*; do
             case "$file" in
               *_aarch64.dmg) label='macOS — Apple Silicon (чипы M) · .dmg' ;;
               *_x64.dmg) label='macOS — Intel · .dmg' ;;
               *.exe) label='Windows — 64-битная (x64) · .exe' ;;
               *.deb) label='Ubuntu / Debian — 64-битные (x64) · .deb' ;;
               *.AppImage) label='Linux — 64-битный (x64) · .AppImage' ;;
-              *) echo "Unrecognized installer: $file"; exit 1 ;;
+              *) labeled_files+=("$file"); continue ;;
             esac
             labeled_files+=("$file#$label")
           done
@@ -131,5 +157,7 @@ jobs:
           - **Linux x64** — пакет для Ubuntu и Debian (.deb) или AppImage.
 
           Тип Mac указан в меню  → «Об этом Mac». При первом захвате приложение скачает Chromium, если его ещё нет.
+
+          Для будущих версий приложение проверяет обновления при запуске. Кнопка **Обновления** показывает доступную версию и позволяет запустить установку.
           EOF
-          gh release create "$RELEASE_TAG" "${labeled_files[@]}" --verify-tag --title "Site Downloader $RELEASE_TAG" --notes-file release-notes.md --generate-notes
+          gh release create "$RELEASE_TAG" "${labeled_files[@]}" --verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md --generate-notes

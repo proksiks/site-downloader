@@ -16,6 +16,7 @@ use tauri::{ipc::Channel, path::BaseDirectory, AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 mod archive_browser;
+mod updates;
 
 #[derive(Default)]
 struct CaptureState(Mutex<Option<ChildStdin>>);
@@ -23,12 +24,22 @@ struct CaptureState(Mutex<Option<ChildStdin>>);
 #[derive(Default)]
 struct ReplayState(Mutex<Option<ChildStdin>>);
 
+#[derive(Default)]
+struct RepairState(Mutex<Option<ChildStdin>>);
+
+#[derive(Serialize, Deserialize)]
+struct FailedPage {
+    url: String,
+    message: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ArchiveInfo {
     folder: PathBuf,
     offline_html: Option<PathBuf>,
     has_scene_assets: bool,
+    failed_pages: Vec<FailedPage>,
 }
 
 fn offline_entry(file: &str) -> Option<PathBuf> {
@@ -84,6 +95,12 @@ fn read_archive_info(directory: PathBuf) -> Result<ArchiveInfo, String> {
         folder: directory,
         offline_html,
         has_scene_assets: archive_file(&root, Path::new("3d/manifest.json")),
+        failed_pages: manifest["failedPages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+            .collect(),
     })
 }
 
@@ -302,34 +319,59 @@ fn run_replay(
         return Err("Выбери папку архива, в которой находится manifest.json.".into());
     }
     let state = app.state::<ReplayState>();
-    let mut active = state.0.lock().map_err(|error| error.to_string())?;
-    if active.is_some() {
-        return Err("Интерактивный просмотр уже открыт.".into());
-    }
     let address_mode = if use_original_address {
         "original"
     } else {
         "local"
     };
-    let mut child = spawn_worker(
+    run_archive_worker(
         &app,
-        &[
+        [
             "--replay".into(),
             directory.into_os_string(),
             address_mode.into(),
         ],
-    )?;
+        &state.0,
+        events,
+        None,
+        "Интерактивный просмотр уже открыт.",
+    )
+    .map(|_| ())
+}
+
+fn run_archive_worker(
+    app: &AppHandle,
+    arguments: impl AsRef<[OsString]>,
+    state: &Mutex<Option<ChildStdin>>,
+    events: Channel<Value>,
+    payload: Option<&str>,
+    busy: &str,
+) -> Result<Value, String> {
+    let mut active = state.lock().map_err(|error| error.to_string())?;
+    if active.is_some() {
+        return Err(busy.into());
+    }
+    let mut child = spawn_worker(app, arguments.as_ref())?;
+    let mut stdin = child.stdin.take().expect("worker stdin is piped");
+    if let Some(payload) = payload {
+        if let Err(error) = writeln!(stdin, "{payload}") {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error.to_string());
+        }
+    }
     let stdout = child.stdout.take().expect("worker stdout is piped");
-    *active = Some(child.stdin.take().expect("worker stdin is piped"));
+    *active = Some(stdin);
     drop(active);
 
-    let mut outcome = Err("Не удалось запустить интерактивный просмотр.".to_string());
+    let mut outcome = Err("Процесс завершился без результата.".to_string());
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         match event["type"].as_str() {
-            Some("complete" | "cancelled") => outcome = Ok(()),
+            Some("complete") => outcome = Ok(event["result"].clone()),
+            Some("cancelled") => outcome = Ok(Value::Null),
             Some("error") => {
                 if let Some(message) = event["message"].as_str() {
                     outcome = Err(message.to_string());
@@ -341,9 +383,70 @@ fn run_replay(
         }
     }
     let exit = child.wait();
-    state.0.lock().map_err(|error| error.to_string())?.take();
+    state.lock().map_err(|error| error.to_string())?.take();
     exit.map_err(|error| error.to_string())?;
     outcome
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairOptions {
+    targets: Vec<RepairTarget>,
+    wait_seconds: u8,
+    login: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RepairTarget {
+    url: String,
+    kind: RepairKind,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RepairKind {
+    Page,
+    Resource,
+}
+
+#[tauri::command]
+async fn repair_archive(
+    app: AppHandle,
+    directory: PathBuf,
+    options: RepairOptions,
+    events: Channel<Value>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_archive_manifest(&directory)?;
+        if options.targets.is_empty()
+            || options.targets.len() > 100
+            || options.targets.iter().any(|item| item.url.len() > 8192)
+        {
+            return Err("Выбери до 100 корректных адресов для докачки.".into());
+        }
+        let payload = serde_json::to_string(&options).map_err(|error| error.to_string())?;
+        let state = app.state::<RepairState>();
+        run_archive_worker(
+            &app,
+            ["--repair".into(), directory.into_os_string()],
+            &state.0,
+            events,
+            Some(&payload),
+            "Докачка уже запущена.",
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn continue_repair(state: State<'_, RepairState>) -> Result<(), String> {
+    send_worker_command(&state.0, b"continue\n")
+}
+
+#[tauri::command]
+fn stop_repair(state: State<'_, RepairState>) -> Result<(), String> {
+    send_worker_command(&state.0, b"cancel\n")
 }
 
 #[tauri::command]
@@ -415,24 +518,38 @@ mod archive_tests {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let mut builder = tauri::Builder::default();
+    if context.config().plugins.0.contains_key("updater") {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(CaptureState::default())
         .manage(ReplayState::default())
+        .manage(RepairState::default())
+        .manage(updates::Updates::default())
         .invoke_handler(tauri::generate_handler![
             start_capture,
             continue_capture,
             cancel_capture,
             replay_archive,
             stop_replay,
+            repair_archive,
+            continue_repair,
+            stop_repair,
             inspect_archive,
             open_archive,
+            updates::update_info,
+            updates::check_app_update,
+            updates::install_app_update,
             archive_browser::list_archive_files,
             archive_browser::preview_archive_file,
+            archive_browser::read_archive_model_file,
             archive_browser::reveal_archive_file,
             archive_browser::analyze_archive_javascript
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to start Site Downloader");
 }

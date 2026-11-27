@@ -35,6 +35,13 @@ const dialog = ref<HTMLDialogElement | null>(null)
       </details>
 
       <details class="help-topic" name="site-downloader-help">
+        <summary>Обновления приложения</summary>
+        <div class="help-copy">
+          <p>Приложение проверяет GitHub Releases при запуске. Когда появится новая версия, открой <strong>Обновления</strong> и нажми <strong>Установить и перезапустить</strong>.</p>
+        </div>
+      </details>
+
+      <details class="help-topic" name="site-downloader-help">
         <summary>Вход и фильтры</summary>
         <div class="help-copy">
           <p>Для закрытой страницы включи <strong>Скачать после входа</strong>, войди в окне Chromium и нажми <strong>Я вошёл, начать захват</strong>.</p>
@@ -66,6 +73,7 @@ const dialog = ref<HTMLDialogElement | null>(null)
         <div class="help-copy">
           <p>Включи <strong>Ручной захват 3D-сцены</strong>. Открой сцену, переключи нужные объекты в Chromium и нажми <strong>Завершить захват сцены</strong>.</p>
           <p>Кнопка <strong>Открыть 3D-файлы</strong> покажет модели, текстуры и зависимости, которые удалось сохранить.</p>
+          <p>Чтобы рассмотреть модель в приложении, открой <strong>Файлы архива → 3D</strong>, выбери GLB или glTF и нажми <strong>Просмотреть 3D</strong>. Для вращения используй мышь или стрелки, для масштаба — колёсико или клавиши + и −.</p>
         </div>
       </details>
 
@@ -73,7 +81,8 @@ const dialog = ref<HTMLDialogElement | null>(null)
         <summary>Если сайт открылся не полностью</summary>
         <div class="help-copy">
           <p>Если браузер показывает <code>file://</code> и скрипты не работают, вернись в приложение и нажми <strong>Запустить с JavaScript</strong>.</p>
-          <p>Проверь список <strong>Не хватило ресурсов</strong>. Если там есть нужный файл, увеличь ожидание или повтори захват в ручном 3D-режиме. Если скрипту нужен исходный домен, включи <strong>Использовать исходный адрес</strong>.</p>
+          <p>В блоке <strong>Не хватило ресурсов</strong> нажми <strong>Докачать пропущенное</strong>, отметь нужные файлы или страницы и запусти докачку. После сохранения заново запусти просмотр с JavaScript.</p>
+          <p>Если файл не появился в списке, попробуй повторить захват в ручном 3D-режиме. Если скрипту нужен исходный домен, включи <strong>Использовать исходный адрес</strong>.</p>
         </div>
       </details>
     </div>
